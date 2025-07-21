@@ -311,7 +311,7 @@ dpdknet/
 
 | 脚本 | 用途 | 使用场景 |
 |------|------|----------|
-| `setup-dpdk.sh` | 完整DPDK环境配置 | 一键配置所有环境 |
+| `setup-dpdk.sh eth1` | 完整DPDK环境配置 | 一键配置所有环境 |
 | `setup-dpdk.sh --compile-only` | 仅编译环境配置 | 开发/测试阶段，无需绑定网卡 |
 | `setup-dpdk.sh --skip-go` | 跳过Go安装 | 已手动安装Go时使用 |
 | `install-go.sh` | 专门安装Go环境 | 解决Go下载问题 |
