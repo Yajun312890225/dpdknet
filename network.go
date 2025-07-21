@@ -18,14 +18,17 @@ var (
 	globalTxFlow      *flow.Flow
 	globalSendCh      chan *packet.Packet
 	udpListeners      map[string]*UDPConn
-	tcpListeners      map[string]interface{} // 为将来的TCP支持预留
+	tcpListeners      map[string]*TCPListener
+	icmpHandlers      map[string]func([]byte, int, int, net.IP, net.IP) // ICMP处理器
 	udpListenersMutex sync.RWMutex
 	tcpListenersMutex sync.RWMutex
+	icmpHandlersMutex sync.RWMutex
 )
 
 func init() {
 	udpListeners = make(map[string]*UDPConn)
-	tcpListeners = make(map[string]interface{})
+	tcpListeners = make(map[string]*TCPListener)
+	icmpHandlers = make(map[string]func([]byte, int, int, net.IP, net.IP))
 	globalSendCh = make(chan *packet.Packet, 4096)
 }
 
@@ -127,9 +130,9 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 
 	switch protocol {
 	case 1: // ICMP
-		handleICMP(data, ipHeaderStart, headerLength, srcIP, dstIP)
+		HandleICMPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
 	case 6: // TCP
-		handleTCP(data, ipHeaderStart, headerLength, srcIP, dstIP)
+		HandleTCPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
 	case 17: // UDP
 		handleUDP(data, ipHeaderStart, headerLength, srcIP, dstIP)
 	default:
@@ -181,16 +184,6 @@ func handleUDP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP
 	}
 }
 
-// handleTCP 处理TCP包 (预留，暂时不实现)
-func handleTCP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP) {
-	log.Printf("[DEBUG] TCP packet received, not implemented yet")
-}
-
-// handleICMP 处理ICMP包 (可以实现ping响应等)
-func handleICMP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP) {
-	log.Printf("[DEBUG] ICMP packet received, not implemented yet")
-}
-
 // globalSendGenerator 全局发送生成器
 func globalSendGenerator(pkt *packet.Packet, ctx flow.UserContext) {
 	select {
@@ -201,9 +194,7 @@ func globalSendGenerator(pkt *packet.Packet, ctx flow.UserContext) {
 		// 没有数据包要发送，生成一个空包
 		packet.InitEmptyPacket(pkt, 0)
 	}
-}
-
-// RegisterUDPListener 注册UDP监听器
+} // RegisterUDPListener 注册UDP监听器
 func RegisterUDPListener(key string, conn *UDPConn) error {
 	udpListenersMutex.Lock()
 	defer udpListenersMutex.Unlock()
@@ -233,4 +224,111 @@ func SendPacket(pkt *packet.Packet) error {
 	default:
 		return fmt.Errorf("global send channel full")
 	}
+}
+
+// RegisterTCPListener 注册TCP监听器
+func RegisterTCPListener(key string, listener *TCPListener) error {
+	tcpListenersMutex.Lock()
+	defer tcpListenersMutex.Unlock()
+
+	if _, exists := tcpListeners[key]; exists {
+		return fmt.Errorf("TCP listener already exists for %s", key)
+	}
+
+	tcpListeners[key] = listener
+	log.Printf("[DEBUG] Registered TCP listener: %s", key)
+	return nil
+}
+
+// UnregisterTCPListener 注销TCP监听器
+func UnregisterTCPListener(key string) {
+	tcpListenersMutex.Lock()
+	defer tcpListenersMutex.Unlock()
+	delete(tcpListeners, key)
+	log.Printf("[DEBUG] Unregistered TCP listener: %s", key)
+}
+
+// FindTCPListenerByKey 根据key查找TCP监听器
+func FindTCPListenerByKey(key string) *TCPListener {
+	tcpListenersMutex.RLock()
+	defer tcpListenersMutex.RUnlock()
+
+	return tcpListeners[key]
+}
+
+// SendTCPPacket 发送TCP数据包
+func SendTCPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, seqNum, ackNum uint32, flags uint8, data []byte) error {
+	// 创建新的数据包
+	pkt, err := packet.NewPacket()
+	if err != nil {
+		return fmt.Errorf("failed to create packet: %v", err)
+	}
+
+	// 构建以太网帧 + IP头 + TCP头 + 数据
+	totalLen := 14 + 20 + 20 + len(data) // 以太网头 + IP头 + TCP头 + 数据
+	rawData := pkt.GetRawPacketBytes()
+
+	// 确保有足够空间
+	if len(rawData) < totalLen {
+		return fmt.Errorf("packet buffer too small")
+	}
+
+	// 构建以太网头 (简化处理，使用广播地址)
+	copy(rawData[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})  // 目标MAC
+	copy(rawData[6:12], []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}) // 源MAC
+	binary.BigEndian.PutUint16(rawData[12:14], 0x0800)              // EtherType: IPv4
+
+	// 构建IP头
+	ipStart := 14
+	rawData[ipStart] = 0x45                                                           // 版本和头长度
+	rawData[ipStart+1] = 0x00                                                         // TOS
+	binary.BigEndian.PutUint16(rawData[ipStart+2:ipStart+4], uint16(20+20+len(data))) // 总长度
+	binary.BigEndian.PutUint16(rawData[ipStart+4:ipStart+6], 0x1234)                  // ID
+	binary.BigEndian.PutUint16(rawData[ipStart+6:ipStart+8], 0x4000)                  // 标志和片偏移
+	rawData[ipStart+8] = 64                                                           // TTL
+	rawData[ipStart+9] = 6                                                            // 协议: TCP
+	binary.BigEndian.PutUint16(rawData[ipStart+10:ipStart+12], 0)                     // 校验和(稍后计算)
+	copy(rawData[ipStart+12:ipStart+16], srcIP.To4())                                 // 源IP
+	copy(rawData[ipStart+16:ipStart+20], dstIP.To4())                                 // 目标IP
+
+	// 构建TCP头
+	tcpStart := ipStart + 20
+	binary.BigEndian.PutUint16(rawData[tcpStart:tcpStart+2], srcPort)   // 源端口
+	binary.BigEndian.PutUint16(rawData[tcpStart+2:tcpStart+4], dstPort) // 目标端口
+	binary.BigEndian.PutUint32(rawData[tcpStart+4:tcpStart+8], seqNum)  // 序列号
+	binary.BigEndian.PutUint32(rawData[tcpStart+8:tcpStart+12], ackNum) // 确认号
+	rawData[tcpStart+12] = 0x50                                         // 数据偏移 (20字节)
+	rawData[tcpStart+13] = flags                                        // 标志位
+	binary.BigEndian.PutUint16(rawData[tcpStart+14:tcpStart+16], 65535) // 窗口大小
+	binary.BigEndian.PutUint16(rawData[tcpStart+16:tcpStart+18], 0)     // 校验和(稍后计算)
+	binary.BigEndian.PutUint16(rawData[tcpStart+18:tcpStart+20], 0)     // 紧急指针
+
+	// 复制数据
+	if len(data) > 0 {
+		copy(rawData[tcpStart+20:tcpStart+20+len(data)], data)
+	}
+
+	// 计算IP头校验和
+	rawData[ipStart+10] = 0
+	rawData[ipStart+11] = 0
+	ipChecksum := calcIPChecksum(rawData[ipStart : ipStart+20])
+	binary.BigEndian.PutUint16(rawData[ipStart+10:ipStart+12], ipChecksum)
+
+	// 计算TCP校验和 (简化处理，设为0)
+	binary.BigEndian.PutUint16(rawData[tcpStart+16:tcpStart+18], 0)
+
+	// 发送数据包
+	return SendPacket(pkt)
+}
+
+// calcIPChecksum 计算IP头校验和
+func calcIPChecksum(data []byte) uint16 {
+	sum := uint32(0)
+	for i := 0; i < len(data)-1; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(data[i : i+2]))
+	}
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+	return ^uint16(sum)
 }

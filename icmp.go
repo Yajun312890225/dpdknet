@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Yajun312890225/nff-go/flow"
 	"github.com/Yajun312890225/nff-go/packet"
 )
 
@@ -29,7 +28,6 @@ type ICMPConn struct {
 	localIP net.IP
 	id      uint16
 	seq     uint16
-	rxFlow  *flow.Flow
 	replyCh chan *ICMPReply
 	mu      sync.Mutex
 	closed  bool
@@ -42,65 +40,9 @@ type ICMPReply struct {
 	RTT      time.Duration
 }
 
-// HandleICMPManual 手动处理ICMP包
-func HandleICMPManual(pkt *packet.Packet, data []byte, ipHeaderStart, headerLength int) {
-	icmpStart := ipHeaderStart + headerLength
-
-	if len(data) < icmpStart+8 {
-		return
-	}
-
-	icmpType := data[icmpStart]
-	icmpCode := data[icmpStart+1]
-
-	// 只处理ICMP Echo Request (type=8, code=0)
-	if icmpType != ICMPEchoRequest || icmpCode != 0 {
-		return
-	}
-
-	// 解析IP地址
-	srcIP := fmt.Sprintf("%d.%d.%d.%d",
-		data[ipHeaderStart+12], data[ipHeaderStart+13],
-		data[ipHeaderStart+14], data[ipHeaderStart+15])
-	dstIP := fmt.Sprintf("%d.%d.%d.%d",
-		data[ipHeaderStart+16], data[ipHeaderStart+17],
-		data[ipHeaderStart+18], data[ipHeaderStart+19])
-
-	log.Printf("ICMP ping: %s -> %s", srcIP, dstIP)
-
-	// 交换源和目标IP地址
-	for i := 0; i < 4; i++ {
-		data[ipHeaderStart+12+i], data[ipHeaderStart+16+i] = data[ipHeaderStart+16+i], data[ipHeaderStart+12+i]
-	}
-
-	// 将ICMP Echo Request改为Echo Reply
-	data[icmpStart] = ICMPEchoReply
-	data[icmpStart+1] = 0
-
-	// 重新计算ICMP校验和
-	data[icmpStart+2] = 0 // 清零校验和
-	data[icmpStart+3] = 0
-
-	// 计算新的ICMP校验和
-	icmpLen := len(data) - icmpStart
-	checksum := CalcChecksum(data[icmpStart : icmpStart+icmpLen])
-	binary.BigEndian.PutUint16(data[icmpStart+2:icmpStart+4], checksum)
-
-	// 重新计算IPv4头校验和
-	data[ipHeaderStart+10] = 0 // 清零校验和
-	data[ipHeaderStart+11] = 0
-
-	ipChecksum := CalcChecksum(data[ipHeaderStart : ipHeaderStart+headerLength])
-	binary.BigEndian.PutUint16(data[ipHeaderStart+10:ipHeaderStart+12], ipChecksum)
-}
-
 func NewICMPConn(localIP net.IP) (*ICMPConn, error) {
-	if err := Init(); err != nil {
-		return nil, err
-	}
-
-	rxFlow, err := flow.SetReceiver(0)
-	if err != nil {
+	// 确保全局网络系统已初始化
+	if err := EnsureGlobalNetworkInit(); err != nil {
 		return nil, err
 	}
 
@@ -108,68 +50,11 @@ func NewICMPConn(localIP net.IP) (*ICMPConn, error) {
 		localIP: localIP,
 		id:      uint16(time.Now().Unix() & 0xFFFF),
 		seq:     0,
-		rxFlow:  rxFlow,
 		replyCh: make(chan *ICMPReply, 1024),
 	}
 
-	// 设置ICMP包处理器
-	flow.SetHandler(rxFlow, conn.handleICMPPacket, nil)
-
+	// ICMP 处理已经通过全局网络系统处理，不需要单独的 flow
 	return conn, nil
-}
-
-func (c *ICMPConn) handleICMPPacket(pkt *packet.Packet, ctx flow.UserContext) {
-	data := pkt.GetRawPacketBytes()
-	if len(data) < 14 {
-		return
-	}
-
-	// 检查是否为IPv4
-	etherType := binary.BigEndian.Uint16(data[12:14])
-	if etherType != 0x0800 {
-		return
-	}
-
-	// 检查是否为ICMP
-	ipHeaderStart := 14
-	if len(data) < ipHeaderStart+20 {
-		return
-	}
-
-	protocol := data[ipHeaderStart+9]
-	if protocol != 1 { // ICMP协议
-		return
-	}
-
-	headerLength := int((data[ipHeaderStart] & 0x0F) * 4)
-	icmpStart := ipHeaderStart + headerLength
-
-	if len(data) < icmpStart+8 {
-		return
-	}
-
-	icmpType := data[icmpStart]
-	if icmpType == ICMPEchoReply {
-		// 解析ICMP Echo Reply
-		id := binary.BigEndian.Uint16(data[icmpStart+4 : icmpStart+6])
-		seq := binary.BigEndian.Uint16(data[icmpStart+6 : icmpStart+8])
-
-		srcIP := net.IPv4(data[ipHeaderStart+12], data[ipHeaderStart+13],
-			data[ipHeaderStart+14], data[ipHeaderStart+15])
-
-		reply := &ICMPReply{
-			Addr:     srcIP,
-			ID:       id,
-			Sequence: seq,
-			RTT:      time.Now().Sub(time.Now()), // 这里应该计算实际的RTT
-		}
-
-		select {
-		case c.replyCh <- reply:
-		default:
-			// 如果通道满了，丢弃这个回复
-		}
-	}
 }
 
 func (c *ICMPConn) Ping(dst net.IP, count int, timeout time.Duration) error {
@@ -212,4 +97,94 @@ func (c *ICMPConn) Close() error {
 	c.closed = true
 	close(c.replyCh)
 	return nil
+}
+
+// HandleICMPPacket 处理ICMP数据包 (由network.go调用)
+func HandleICMPPacket(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP) {
+	icmpStart := ipHeaderStart + headerLength
+	if len(data) < icmpStart+8 {
+		log.Printf("[DEBUG] ICMP packet too short")
+		return
+	}
+
+	icmpType := data[icmpStart]
+	icmpCode := data[icmpStart+1]
+	log.Printf("[DEBUG] ICMP: %s -> %s (type=%d, code=%d)",
+		srcIP.String(), dstIP.String(), icmpType, icmpCode)
+
+	// 处理不同类型的ICMP包
+	switch icmpType {
+	case ICMPEchoRequest: // Echo Request (ping)
+		if icmpCode == 0 {
+			handlePingRequest(data, ipHeaderStart, headerLength, icmpStart, srcIP, dstIP)
+		}
+	case ICMPEchoReply: // Echo Reply
+		log.Printf("[DEBUG] Received ping reply from %s", srcIP.String())
+	default:
+		log.Printf("[DEBUG] Unsupported ICMP type: %d", icmpType)
+	}
+}
+
+// handlePingRequest 处理ping请求并发送回复
+func handlePingRequest(data []byte, ipHeaderStart, headerLength, icmpStart int, srcIP, dstIP net.IP) {
+	log.Printf("[DEBUG] Handling ping request from %s", srcIP.String())
+
+	// 交换源和目标IP
+	for i := 0; i < 4; i++ {
+		data[ipHeaderStart+12+i], data[ipHeaderStart+16+i] = data[ipHeaderStart+16+i], data[ipHeaderStart+12+i]
+	}
+
+	// 将ICMP类型改为Echo Reply (0)
+	data[icmpStart] = ICMPEchoReply
+
+	// 重新计算ICMP校验和
+	data[icmpStart+2] = 0 // 清零校验和
+	data[icmpStart+3] = 0
+
+	icmpLen := len(data) - icmpStart
+	sum := uint32(0)
+	for i := icmpStart; i < icmpStart+icmpLen-1; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(data[i : i+2]))
+	}
+	if icmpLen%2 == 1 {
+		sum += uint32(data[icmpStart+icmpLen-1]) << 8
+	}
+
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+	checksum := ^uint16(sum)
+	binary.BigEndian.PutUint16(data[icmpStart+2:icmpStart+4], checksum)
+
+	// 重新计算IP头校验和
+	data[ipHeaderStart+10] = 0
+	data[ipHeaderStart+11] = 0
+
+	sum = uint32(0)
+	for i := ipHeaderStart; i < ipHeaderStart+headerLength-1; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(data[i : i+2]))
+	}
+
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+	checksum = ^uint16(sum)
+	binary.BigEndian.PutUint16(data[ipHeaderStart+10:ipHeaderStart+12], checksum)
+
+	// 创建新数据包并发送
+	pkt, err := packet.NewPacket()
+	if err != nil {
+		log.Printf("[ERROR] Failed to create ping reply packet: %v", err)
+		return
+	}
+
+	// 复制修改后的数据
+	rawData := pkt.GetRawPacketBytes()
+	copy(rawData, data)
+
+	if err := SendPacket(pkt); err != nil {
+		log.Printf("[ERROR] Failed to send ping reply: %v", err)
+	} else {
+		log.Printf("[DEBUG] Ping reply sent to %s", srcIP.String())
+	}
 }

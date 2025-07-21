@@ -8,9 +8,6 @@ import (
 	"net"
 	"sync"
 	"time"
-
-	"github.com/Yajun312890225/nff-go/flow"
-	"github.com/Yajun312890225/nff-go/packet"
 )
 
 const (
@@ -56,7 +53,6 @@ type TCPConn struct {
 	state      TCPState
 	seqNum     uint32
 	ackNum     uint32
-	rxFlow     *flow.Flow
 	dataCh     chan []byte
 	mu         sync.Mutex
 	closed     bool
@@ -64,190 +60,48 @@ type TCPConn struct {
 
 type TCPListener struct {
 	localAddr *TCPAddr
-	rxFlow    *flow.Flow
 	connCh    chan *TCPConn
 	mu        sync.Mutex
 	closed    bool
 }
 
-// HandleTCPManual 手动处理TCP包
-func HandleTCPManual(pkt *packet.Packet, data []byte, ipHeaderStart, headerLength int) {
-	tcpStart := ipHeaderStart + headerLength
-
-	if len(data) < tcpStart+20 {
-		return
-	}
-
-	// 解析TCP头
-	srcPort := binary.BigEndian.Uint16(data[tcpStart : tcpStart+2])
-	dstPort := binary.BigEndian.Uint16(data[tcpStart+2 : tcpStart+4])
-	seqNum := binary.BigEndian.Uint32(data[tcpStart+4 : tcpStart+8])
-	ackNum := binary.BigEndian.Uint32(data[tcpStart+8 : tcpStart+12])
-	flags := data[tcpStart+13]
-
-	// 解析IP地址
-	srcIP := fmt.Sprintf("%d.%d.%d.%d",
-		data[ipHeaderStart+12], data[ipHeaderStart+13],
-		data[ipHeaderStart+14], data[ipHeaderStart+15])
-	dstIP := fmt.Sprintf("%d.%d.%d.%d",
-		data[ipHeaderStart+16], data[ipHeaderStart+17],
-		data[ipHeaderStart+18], data[ipHeaderStart+19])
-
-	log.Printf("TCP: %s:%d -> %s:%d (seq=%d, ack=%d, flags=0x%02x)",
-		srcIP, srcPort, dstIP, dstPort, seqNum, ackNum, flags)
-
-	// 简单的TCP echo服务器实现
-	// 只处理目标端口为8080的TCP包
-	if dstPort != 8080 {
-		return
-	}
-
-	// 如果是SYN包，发送SYN+ACK
-	if flags&TCPFlagSYN != 0 && flags&TCPFlagACK == 0 {
-		sendTCPSynAck(data, ipHeaderStart, headerLength, tcpStart, srcPort, dstPort, seqNum)
-		return
-	}
-
-	// 如果是ACK包，建立连接
-	if flags&TCPFlagACK != 0 && flags&TCPFlagSYN == 0 {
-		// 连接已建立，可以处理数据
-		tcpHeaderLen := int((data[tcpStart+12] >> 4) * 4)
-		dataStart := tcpStart + tcpHeaderLen
-		dataLen := len(data) - dataStart
-
-		if dataLen > 0 {
-			// 有数据，回显数据
-			echoTCPData(data, ipHeaderStart, headerLength, tcpStart, srcPort, dstPort, seqNum, ackNum, dataLen)
-		}
-	}
-}
-
-func sendTCPSynAck(data []byte, ipHeaderStart, headerLength, tcpStart int, srcPort, dstPort uint16, clientSeq uint32) {
-	// 交换源和目标IP地址
-	for i := 0; i < 4; i++ {
-		data[ipHeaderStart+12+i], data[ipHeaderStart+16+i] = data[ipHeaderStart+16+i], data[ipHeaderStart+12+i]
-	}
-
-	// 交换源和目标端口
-	binary.BigEndian.PutUint16(data[tcpStart:tcpStart+2], dstPort)
-	binary.BigEndian.PutUint16(data[tcpStart+2:tcpStart+4], srcPort)
-
-	// 设置序列号和确认号
-	serverSeq := uint32(time.Now().Unix())
-	binary.BigEndian.PutUint32(data[tcpStart+4:tcpStart+8], serverSeq)    // 服务器序列号
-	binary.BigEndian.PutUint32(data[tcpStart+8:tcpStart+12], clientSeq+1) // 确认号
-
-	// 设置标志位：SYN + ACK
-	data[tcpStart+13] = TCPFlagSYN | TCPFlagACK
-
-	// 设置窗口大小
-	binary.BigEndian.PutUint16(data[tcpStart+14:tcpStart+16], 65535)
-
-	// 重新计算TCP校验和 (简化处理，设为0)
-	binary.BigEndian.PutUint16(data[tcpStart+16:tcpStart+18], 0)
-
-	// 重新计算IPv4头校验和
-	data[ipHeaderStart+10] = 0
-	data[ipHeaderStart+11] = 0
-	ipChecksum := CalcChecksum(data[ipHeaderStart : ipHeaderStart+headerLength])
-	binary.BigEndian.PutUint16(data[ipHeaderStart+10:ipHeaderStart+12], ipChecksum)
-
-	log.Printf("Sent TCP SYN+ACK: seq=%d, ack=%d", serverSeq, clientSeq+1)
-}
-
-func echoTCPData(data []byte, ipHeaderStart, headerLength, tcpStart int, srcPort, dstPort uint16, clientSeq, clientAck uint32, dataLen int) {
-	// 交换源和目标IP地址
-	for i := 0; i < 4; i++ {
-		data[ipHeaderStart+12+i], data[ipHeaderStart+16+i] = data[ipHeaderStart+16+i], data[ipHeaderStart+12+i]
-	}
-
-	// 交换源和目标端口
-	binary.BigEndian.PutUint16(data[tcpStart:tcpStart+2], dstPort)
-	binary.BigEndian.PutUint16(data[tcpStart+2:tcpStart+4], srcPort)
-
-	// 设置序列号和确认号
-	binary.BigEndian.PutUint32(data[tcpStart+4:tcpStart+8], clientAck)                  // 使用客户端的ACK作为我们的SEQ
-	binary.BigEndian.PutUint32(data[tcpStart+8:tcpStart+12], clientSeq+uint32(dataLen)) // 确认收到的数据
-
-	// 设置标志位：PSH + ACK
-	data[tcpStart+13] = TCPFlagPSH | TCPFlagACK
-
-	// 重新计算TCP校验和 (简化处理，设为0)
-	binary.BigEndian.PutUint16(data[tcpStart+16:tcpStart+18], 0)
-
-	// 重新计算IPv4头校验和
-	data[ipHeaderStart+10] = 0
-	data[ipHeaderStart+11] = 0
-	ipChecksum := CalcChecksum(data[ipHeaderStart : ipHeaderStart+headerLength])
-	binary.BigEndian.PutUint16(data[ipHeaderStart+10:ipHeaderStart+12], ipChecksum)
-
-	log.Printf("Echoed TCP data: %d bytes", dataLen)
-}
-
 func ListenTCP(network string, laddr *TCPAddr) (*TCPListener, error) {
-	if err := Init(); err != nil {
-		return nil, err
-	}
-
-	rxFlow, err := flow.SetReceiver(0)
-	if err != nil {
+	// 确保全局网络系统已初始化
+	if err := EnsureGlobalNetworkInit(); err != nil {
 		return nil, err
 	}
 
 	listener := &TCPListener{
 		localAddr: laddr,
-		rxFlow:    rxFlow,
 		connCh:    make(chan *TCPConn, 1024),
 	}
 
-	// 设置TCP包处理器
-	flow.SetHandler(rxFlow, listener.handleTCPPacket, nil)
+	// 注册TCP监听器到全局网络系统
+	key := fmt.Sprintf("tcp:%s:%d", laddr.IP.String(), laddr.Port)
+	if err := RegisterTCPListener(key, listener); err != nil {
+		return nil, err
+	}
 
 	return listener, nil
 }
 
-func (l *TCPListener) handleTCPPacket(pkt *packet.Packet, ctx flow.UserContext) {
-	data := pkt.GetRawPacketBytes()
-	if len(data) < 14 {
-		return
-	}
-
-	// 检查是否为IPv4
-	etherType := binary.BigEndian.Uint16(data[12:14])
-	if etherType != 0x0800 {
-		return
-	}
-
-	// 检查是否为TCP
-	ipHeaderStart := 14
-	if len(data) < ipHeaderStart+20 {
-		return
-	}
-
-	protocol := data[ipHeaderStart+9]
-	if protocol != 6 { // TCP协议
-		return
-	}
-
-	headerLength := int((data[ipHeaderStart] & 0x0F) * 4)
-	HandleTCPManual(pkt, data, ipHeaderStart, headerLength)
-}
-
 func (l *TCPListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
 	if l.closed {
+		l.mu.Unlock()
 		return nil, errors.New("listener closed")
 	}
+	l.mu.Unlock()
 
-	// 在实际实现中，这里应该从连接队列中获取新连接
-	// 现在简化为创建一个新连接
-	conn := &TCPConn{
-		localAddr:  l.localAddr,
-		remoteAddr: &TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0},
-		state:      TCPStateEstablished,
-		dataCh:     make(chan []byte, 1024),
+	// 从连接队列中获取新连接
+	select {
+	case conn := <-l.connCh:
+		log.Printf("[DEBUG] Accepted new TCP connection: %s -> %s",
+			conn.remoteAddr.String(), conn.localAddr.String())
+		return conn, nil
+	case <-time.After(30 * time.Second):
+		return nil, errors.New("accept timeout")
 	}
-
-	return conn, nil
 }
 
 // AcceptTCP accepts the next incoming call and returns the new connection.
@@ -265,8 +119,15 @@ func (l *TCPListener) Close() error {
 	if l.closed {
 		return nil
 	}
+
+	// 从全局网络系统中注销监听器
+	key := fmt.Sprintf("tcp:%s:%d", l.localAddr.IP.String(), l.localAddr.Port)
+	UnregisterTCPListener(key)
+
 	l.closed = true
 	close(l.connCh)
+
+	log.Printf("[DEBUG] TCP listener closed: %s", l.localAddr.String())
 	return nil
 }
 
@@ -276,13 +137,18 @@ func (l *TCPListener) Addr() net.Addr {
 }
 
 func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
-	if err := Init(); err != nil {
+	// 确保全局网络系统已初始化
+	if err := EnsureGlobalNetworkInit(); err != nil {
 		return nil, err
 	}
 
 	localAddr := laddr
 	if localAddr == nil {
-		localAddr = &TCPAddr{IP: net.IPv4(192, 168, 1, 100), Port: 0} // 临时本地地址
+		// 使用随机端口
+		localAddr = &TCPAddr{
+			IP:   net.IPv4(0, 0, 0, 0),                 // 让系统选择本地IP
+			Port: int(time.Now().Unix()%10000 + 20000), // 随机端口 20000-29999
+		}
 	}
 
 	conn := &TCPConn{
@@ -290,11 +156,29 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 		remoteAddr: raddr,
 		state:      TCPStateSynSent,
 		dataCh:     make(chan []byte, 1024),
+		seqNum:     uint32(time.Now().Unix()), // 初始序列号
 	}
 
-	// 这里应该发送SYN包并等待SYN+ACK
-	// 简化实现，直接设为已建立状态
+	// 发送SYN包开始三次握手
+	log.Printf("[DEBUG] Sending TCP SYN to %s", raddr.String())
+	flags := uint8(TCPFlagSYN)
+	err := SendTCPPacket(localAddr.IP, raddr.IP,
+		uint16(localAddr.Port), uint16(raddr.Port),
+		conn.seqNum, 0, flags, nil)
+
+	if err != nil {
+		log.Printf("[ERROR] Failed to send TCP SYN: %v", err)
+		return nil, err
+	}
+
+	// 简化实现：直接设为已建立状态
+	// 实际应该等待SYN+ACK响应，然后发送ACK完成握手
+	time.Sleep(100 * time.Millisecond) // 模拟网络延迟
 	conn.state = TCPStateEstablished
+	conn.seqNum++
+
+	log.Printf("[DEBUG] TCP connection established: %s -> %s",
+		localAddr.String(), raddr.String())
 
 	return conn, nil
 }
@@ -314,13 +198,32 @@ func (c *TCPConn) Read(buf []byte) (int, error) {
 }
 
 func (c *TCPConn) Write(data []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.closed {
 		return 0, errors.New("connection closed")
 	}
 
-	// 这里应该构造TCP数据包并发送
-	// 简化实现，直接返回成功
-	log.Printf("TCP Write: %d bytes to %s", len(data), c.remoteAddr.String())
+	if c.state != TCPStateEstablished {
+		return 0, errors.New("connection not established")
+	}
+
+	// 使用全局网络系统发送TCP数据包
+	flags := uint8(TCPFlagPSH | TCPFlagACK)
+	err := SendTCPPacket(c.localAddr.IP, c.remoteAddr.IP,
+		uint16(c.localAddr.Port), uint16(c.remoteAddr.Port),
+		c.seqNum, c.ackNum, flags, data)
+
+	if err != nil {
+		log.Printf("[ERROR] Failed to send TCP data: %v", err)
+		return 0, err
+	}
+
+	// 更新序列号
+	c.seqNum += uint32(len(data))
+
+	log.Printf("[DEBUG] TCP Write: %d bytes to %s", len(data), c.remoteAddr.String())
 	return len(data), nil
 }
 
@@ -373,5 +276,128 @@ func ListenNet(network, address string) (net.Listener, error) {
 		return ListenTCP(network, addr)
 	default:
 		return nil, errors.New("unsupported network type: " + network)
+	}
+}
+
+// HandleTCPPacket 处理TCP数据包 (由network.go调用)
+func HandleTCPPacket(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP) {
+	tcpStart := ipHeaderStart + headerLength
+	if len(data) < tcpStart+20 {
+		log.Printf("[DEBUG] TCP packet too short")
+		return
+	}
+
+	// 解析TCP头
+	srcPort := binary.BigEndian.Uint16(data[tcpStart : tcpStart+2])
+	dstPort := binary.BigEndian.Uint16(data[tcpStart+2 : tcpStart+4])
+	seqNum := binary.BigEndian.Uint32(data[tcpStart+4 : tcpStart+8])
+	ackNum := binary.BigEndian.Uint32(data[tcpStart+8 : tcpStart+12])
+	flags := data[tcpStart+13]
+
+	log.Printf("[DEBUG] TCP: %s:%d -> %s:%d (seq=%d, ack=%d, flags=0x%02x)",
+		srcIP.String(), srcPort, dstIP.String(), dstPort, seqNum, ackNum, flags)
+
+	// 查找对应的TCP监听器
+	key := fmt.Sprintf("tcp:%s:%d", dstIP.String(), dstPort)
+	listener := findTCPListener(key)
+
+	if listener == nil {
+		// 尝试通配符匹配
+		wildcardKey := fmt.Sprintf("tcp:0.0.0.0:%d", dstPort)
+		listener = findTCPListener(wildcardKey)
+
+		if listener == nil {
+			log.Printf("[DEBUG] No TCP listener found for %s or %s", key, wildcardKey)
+			return
+		}
+	}
+
+	// 处理TCP状态机
+	processTCPPacketForListener(listener, data, tcpStart, srcIP, srcPort, dstIP, dstPort, seqNum, ackNum, flags)
+}
+
+// findTCPListener 查找TCP监听器
+func findTCPListener(key string) *TCPListener {
+	// 调用network.go中的函数来查找监听器
+	return FindTCPListenerByKey(key)
+}
+
+// processTCPPacketForListener 为指定的监听器处理TCP数据包
+func processTCPPacketForListener(listener *TCPListener, data []byte, tcpStart int, srcIP net.IP, srcPort uint16, dstIP net.IP, dstPort uint16, seqNum, ackNum uint32, flags uint8) {
+	log.Printf("[DEBUG] Processing TCP packet for listener: flags=0x%02x", flags)
+
+	// 如果是SYN包，创建新连接
+	if flags&TCPFlagSYN != 0 && flags&TCPFlagACK == 0 { // SYN 且没有 ACK
+		log.Printf("[DEBUG] Received SYN, creating new connection")
+
+		conn := &TCPConn{
+			localAddr: &TCPAddr{
+				IP:   dstIP,
+				Port: int(dstPort),
+			},
+			remoteAddr: &TCPAddr{
+				IP:   srcIP,
+				Port: int(srcPort),
+			},
+			dataCh: make(chan []byte, 1024),
+			seqNum: 1000, // 初始序列号
+			ackNum: seqNum + 1,
+			state:  TCPStateSynReceived,
+		}
+
+		// 发送SYN+ACK响应
+		sendTCPSynAckForListener(srcIP, srcPort, dstIP, dstPort, seqNum+1, conn.seqNum)
+
+		// 将连接放入accept队列
+		select {
+		case listener.connCh <- conn:
+			log.Printf("[DEBUG] New TCP connection queued for accept")
+		default:
+			log.Printf("[WARNING] TCP accept queue full")
+		}
+		return
+	}
+
+	// 处理已建立连接的数据包
+	// 查找现有连接 (简化实现，实际应该维护连接映射表)
+	if flags&TCPFlagACK != 0 {
+		// 解析数据部分
+		tcpHeaderLen := int((data[tcpStart+12] >> 4) * 4)
+		dataStart := tcpStart + tcpHeaderLen
+		payloadLen := len(data) - dataStart
+
+		if payloadLen > 0 {
+			log.Printf("[DEBUG] Received %d bytes of TCP data", payloadLen)
+			// 这里应该将数据传递给对应的连接
+			// 简化处理，暂时只记录日志
+
+			// 发送ACK确认
+			sendTCPAck(srcIP, srcPort, dstIP, dstPort, ackNum, seqNum+uint32(payloadLen))
+		}
+	}
+}
+
+// sendTCPAck 发送TCP ACK确认
+func sendTCPAck(dstIP net.IP, dstPort uint16, srcIP net.IP, srcPort uint16, seqNum, ackNum uint32) {
+	flags := uint8(TCPFlagACK)
+	err := SendTCPPacket(srcIP, dstIP, srcPort, dstPort, seqNum, ackNum, flags, nil)
+	if err != nil {
+		log.Printf("[ERROR] Failed to send TCP ACK: %v", err)
+	} else {
+		log.Printf("[DEBUG] TCP ACK sent: seq=%d, ack=%d", seqNum, ackNum)
+	}
+}
+
+// sendTCPSynAckForListener 发送TCP SYN+ACK响应
+func sendTCPSynAckForListener(dstIP net.IP, dstPort uint16, srcIP net.IP, srcPort uint16, ackNum, seqNum uint32) {
+	log.Printf("[DEBUG] Sending TCP SYN+ACK reply from %s:%d to %s:%d", srcIP.String(), srcPort, dstIP.String(), dstPort)
+
+	// 使用全局网络系统发送SYN+ACK包
+	flags := uint8(TCPFlagSYN | TCPFlagACK)
+	err := SendTCPPacket(srcIP, dstIP, srcPort, dstPort, seqNum, ackNum, flags, nil)
+	if err != nil {
+		log.Printf("[ERROR] Failed to send TCP SYN+ACK: %v", err)
+	} else {
+		log.Printf("[DEBUG] TCP SYN+ACK sent successfully")
 	}
 }
