@@ -54,7 +54,7 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	}
 	log.Printf("[DEBUG] Created UDPConn with localAddr=%v, txPort=%d", laddr, dpdkPort)
 
-	// 创建发送流
+	// 创建独立的发送流
 	log.Printf("[DEBUG] Creating TX flow...")
 	txFlow := flow.SetGenerator(func(pkt *packet.Packet, ctx flow.UserContext) {
 		select {
@@ -69,15 +69,6 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	}, nil)
 	c.txFlow = txFlow
 	log.Printf("[DEBUG] TX flow created successfully")
-
-	// 设置发送器 - 这是流的终止点
-	log.Printf("[DEBUG] Setting TX sender to port %d", dpdkPort)
-	err = flow.SetSender(txFlow, dpdkPort)
-	if err != nil {
-		log.Printf("[ERROR] Failed to set TX sender: %v", err)
-		return nil, err
-	}
-	log.Printf("[DEBUG] TX sender set successfully")
 
 	flow.SetHandler(rxFlow, func(pkt *packet.Packet, ctx flow.UserContext) {
 		data := pkt.GetRawPacketBytes()
@@ -165,14 +156,14 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 
 	log.Printf("[DEBUG] Handler set successfully")
 
-	// 设置发送器来关闭接收流 - 根据你提供的正确流程
-	log.Printf("[DEBUG] Setting RX sender to port %d", dpdkPort)
-	err = flow.SetSender(rxFlow, dpdkPort)
+	// 为发送流设置发送器
+	log.Printf("[DEBUG] Setting TX sender to port %d", dpdkPort)
+	err = flow.SetSender(txFlow, dpdkPort)
 	if err != nil {
-		log.Printf("[ERROR] Failed to set RX sender: %v", err)
+		log.Printf("[ERROR] Failed to set TX sender: %v", err)
 		return nil, err
 	}
-	log.Printf("[DEBUG] RX sender set successfully")
+	log.Printf("[DEBUG] TX sender set successfully")
 
 	// 启动DPDK数据包处理系统
 	// 这必须在所有流和处理器设置完成后调用
