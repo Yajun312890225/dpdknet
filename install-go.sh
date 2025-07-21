@@ -29,6 +29,17 @@ fi
 echo ""
 echo "开始安装 Go 1.19.13..."
 
+# 检查SSL证书问题
+echo ""
+echo "检查网络和SSL配置..."
+if ! curl -s --connect-timeout 5 https://go.dev > /dev/null; then
+    echo "⚠️  警告: 检测到网络或SSL证书问题"
+    echo "   这可能影响HTTPS下载，脚本会自动尝试多种解决方案"
+    echo "   包括: HTTP镜像源、跳过SSL验证等"
+else
+    echo "✅ 网络连接正常"
+fi
+
 cd /tmp
 
 # 清理旧文件
@@ -40,11 +51,22 @@ download_success=false
 # 方法1: curl (通常比wget更可靠)
 echo "1. 尝试使用 curl 下载..."
 if command -v curl &> /dev/null; then
+    # 首先尝试正常下载
     if curl -L --connect-timeout 30 --max-time 300 --progress-bar \
        -o go1.19.13.linux-amd64.tar.gz \
        https://go.dev/dl/go1.19.13.linux-amd64.tar.gz; then
         download_success=true
         echo "✅ curl 下载成功"
+    else
+        echo "   正常下载失败，尝试跳过SSL验证..."
+        # 如果SSL验证失败，尝试跳过SSL验证 (仅作为备选方案)
+        if curl -L -k --connect-timeout 30 --max-time 300 --progress-bar \
+           -o go1.19.13.linux-amd64.tar.gz \
+           https://go.dev/dl/go1.19.13.linux-amd64.tar.gz; then
+            download_success=true
+            echo "✅ curl 下载成功 (跳过SSL验证)"
+            echo "⚠️  警告: 已跳过SSL证书验证，建议检查网络配置"
+        fi
     fi
 fi
 
@@ -55,6 +77,14 @@ if [ "$download_success" = false ]; then
        https://go.dev/dl/go1.19.13.linux-amd64.tar.gz; then
         download_success=true
         echo "✅ wget 官方源下载成功"
+    else
+        echo "   wget 正常下载失败，尝试跳过SSL验证..."
+        if wget --timeout=30 --tries=3 --continue --progress=bar --no-check-certificate \
+           https://go.dev/dl/go1.19.13.linux-amd64.tar.gz; then
+            download_success=true
+            echo "✅ wget 官方源下载成功 (跳过SSL验证)"
+            echo "⚠️  警告: 已跳过SSL证书验证，建议检查网络配置"
+        fi
     fi
 fi
 
@@ -65,12 +95,29 @@ if [ "$download_success" = false ]; then
        https://studygolang.com/dl/golang/go1.19.13.linux-amd64.tar.gz; then
         download_success=true
         echo "✅ 中国镜像源下载成功"
+    else
+        echo "   HTTPS镜像源失败，尝试HTTP镜像源..."
+        if wget --timeout=30 --tries=3 --continue --progress=bar \
+           http://mirrors.ustc.edu.cn/golang/go1.19.13.linux-amd64.tar.gz; then
+            download_success=true
+            echo "✅ HTTP镜像源下载成功"
+        fi
     fi
 fi
 
-# 方法4: 使用代理 (如果设置了)
+# 方法4: 阿里云镜像源 (HTTP)
+if [ "$download_success" = false ]; then
+    echo "4. 尝试阿里云镜像源 (HTTP)..."
+    if wget --timeout=30 --tries=3 --continue --progress=bar \
+       http://mirrors.aliyun.com/golang/go1.19.13.linux-amd64.tar.gz; then
+        download_success=true
+        echo "✅ 阿里云镜像源下载成功"
+    fi
+fi
+
+# 方法5: 使用代理 (如果设置了)
 if [ "$download_success" = false ] && [ ! -z "$http_proxy" ]; then
-    echo "4. 尝试使用代理下载..."
+    echo "5. 尝试使用代理下载..."
     if wget --timeout=30 --tries=2 --progress=bar \
        https://go.dev/dl/go1.19.13.linux-amd64.tar.gz; then
         download_success=true
@@ -78,10 +125,20 @@ if [ "$download_success" = false ] && [ ! -z "$http_proxy" ]; then
     fi
 fi
 
-# 方法5: 手动下载提示
+# 方法6: 手动下载提示
 if [ "$download_success" = false ]; then
     echo ""
     echo "❌ 自动下载失败"
+    echo ""
+    echo "可能的问题:"
+    echo "- SSL证书验证失败"
+    echo "- 网络连接问题" 
+    echo "- 防火墙或代理限制"
+    echo ""
+    echo "解决方案:"
+    echo ""
+    echo "方案1: 运行SSL证书修复脚本"
+    echo "  sudo ./fix-ssl-certs.sh"
     echo ""
     echo "请尝试以下手动下载方法之一:"
     echo ""
@@ -91,7 +148,18 @@ if [ "$download_success" = false ]; then
     echo "  3. 复制到: /tmp/go1.19.13.linux-amd64.tar.gz"
     echo "  4. 重新运行此脚本"
     echo ""
-    echo "方法2: 使用其他工具下载"
+    echo "方法2: 解决SSL证书问题后下载"
+    echo "  # 更新系统证书"
+    echo "  sudo apt update && sudo apt install ca-certificates"
+    echo "  # 或者跳过SSL验证 (不推荐，但可临时使用)"
+    echo "  curl -L -k -o /tmp/go1.19.13.linux-amd64.tar.gz https://go.dev/dl/go1.19.13.linux-amd64.tar.gz"
+    echo ""
+    echo "方法3: 使用HTTP镜像源"
+    echo "  wget -O /tmp/go1.19.13.linux-amd64.tar.gz http://mirrors.ustc.edu.cn/golang/go1.19.13.linux-amd64.tar.gz"
+    echo "  # 或阿里云镜像"
+    echo "  wget -O /tmp/go1.19.13.linux-amd64.tar.gz http://mirrors.aliyun.com/golang/go1.19.13.linux-amd64.tar.gz"
+    echo ""
+    echo "方法4: 使用其他工具下载"
     echo "  # 使用 curl"
     echo "  curl -L -o /tmp/go1.19.13.linux-amd64.tar.gz https://go.dev/dl/go1.19.13.linux-amd64.tar.gz"
     echo ""

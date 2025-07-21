@@ -314,6 +314,7 @@ dpdknet/
 | `setup-dpdk.sh` | 完整DPDK环境配置 | 一键配置所有环境 |
 | `setup-dpdk.sh --compile-only` | 仅编译环境配置 | 开发/测试阶段，无需绑定网卡 |
 | `install-go.sh` | 专门安装Go环境 | 解决Go下载问题 |
+| `fix-ssl-certs.sh` | SSL证书问题修复 | 解决下载时的SSL验证错误 |
 | `check-dpdk-env.sh` | 环境诊断检查 | 排查配置问题 |
 | `fix-dpdk-drivers.sh` | 驱动库修复 | 解决网卡驱动缺失问题 |
 
@@ -414,13 +415,22 @@ cd examples/icmpclient && go build && sudo ./icmpclient 8.8.8.8
 # 方法1: 使用专门的Go安装脚本
 sudo ./install-go.sh
 
-# 方法2: 手动下载Go
+# 方法2: SSL证书问题修复
+sudo ./fix-ssl-certs.sh  # 修复SSL证书问题
+sudo ./install-go.sh     # 重新尝试安装
+
+# 方法3: 手动下载Go
 wget https://go.dev/dl/go1.19.13.linux-amd64.tar.gz
 sudo tar -C /usr/local -xzf go1.19.13.linux-amd64.tar.gz
 export PATH=/usr/local/go/bin:$PATH
 
-# 方法3: 使用镜像源
-wget https://studygolang.com/dl/golang/go1.19.13.linux-amd64.tar.gz
+# 方法4: 使用HTTP镜像源 (避免SSL问题)
+wget http://mirrors.ustc.edu.cn/golang/go1.19.13.linux-amd64.tar.gz
+# 或阿里云镜像
+wget http://mirrors.aliyun.com/golang/go1.19.13.linux-amd64.tar.gz
+
+# 方法5: 跳过SSL验证 (不推荐，但可作为临时方案)
+curl -L -k -o go1.19.13.linux-amd64.tar.gz https://go.dev/dl/go1.19.13.linux-amd64.tar.gz
 
 # 然后跳过Go安装运行DPDK配置
 sudo ./setup-dpdk.sh eth0 --skip-go
@@ -750,7 +760,26 @@ go func() {
    find /usr/local/lib* -name "librte_net_*.a" | sort
    ```
 
-6. **Hugepages配置问题**
+6. **SSL证书验证失败 (下载问题)**
+   ```bash
+   # 问题：curl或wget下载时出现SSL证书错误
+   # 错误信息：SSL certificate problem: unable to get local issuer certificate
+   
+   # 解决方案1: 运行SSL证书修复脚本
+   sudo ./fix-ssl-certs.sh
+   
+   # 解决方案2: 更新系统证书
+   sudo apt update && sudo apt install ca-certificates  # Debian/Ubuntu
+   sudo yum update ca-certificates                       # RedHat/CentOS
+   
+   # 解决方案3: 使用HTTP镜像源
+   wget http://mirrors.ustc.edu.cn/golang/go1.19.13.linux-amd64.tar.gz
+   
+   # 解决方案4: 跳过SSL验证 (临时方案，不推荐)
+   curl -L -k -o go1.19.13.linux-amd64.tar.gz https://go.dev/dl/go1.19.13.linux-amd64.tar.gz
+   ```
+
+7. **Hugepages配置问题**
 
 5. **性能不佳：hugepages 不足**
    ```bash
