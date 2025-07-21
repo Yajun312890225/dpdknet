@@ -26,39 +26,10 @@ fi
 
 echo "当前DPDK版本: $(pkg-config --modversion libdpdk)"
 
-# 获取DPDK源码目录
+# 获取DPDK源码目录（可选，用于搜索库文件）
 DPDK_SRC_DIR="/tmp/dpdk-stable-19.11.14"
-if [ ! -d "$DPDK_SRC_DIR" ]; then
-    echo "❌ DPDK源码目录不存在: $DPDK_SRC_DIR"
-    echo "   请先运行 setup-dpdk.sh 下载DPDK源码"
-    exit 1
-fi
 
-cd "$DPDK_SRC_DIR"
-
-echo "1. 重新配置DPDK构建以启用所有驱动..."
-
-# 删除旧的构建目录
-if [ -d "build" ]; then
-    echo "   删除旧的构建配置..."
-    rm -rf build
-fi
-
-# 重新配置，显式启用所有网卡驱动
-echo "   配置meson构建..."
-meson build 
-
-cd build
-
-echo "2. 重新编译DPDK..."
-ninja clean || true
-ninja
-
-echo "3. 重新安装DPDK..."
-ninja install
-ldconfig
-
-echo "4. 验证驱动库文件..."
+echo "1. 验证驱动库文件..."
 
 # 检查库文件路径
 dpdk_lib_path=$(pkg-config --variable=libdir libdpdk 2>/dev/null || echo "/usr/local/lib/x86_64-linux-gnu")
@@ -81,7 +52,7 @@ else
 fi
 
 # 检查并创建 librte_pmd_vmxnet3_uio.a (用于兼容旧版本链接器需求)
-echo "5. 处理 VMXNet3 UIO 驱动兼容性..."
+echo "2. 处理 VMXNet3 UIO 驱动兼容性..."
 if [ "$vmxnet3_lib_found" = true ]; then
     # 如果存在 librte_net_vmxnet3.a，创建 librte_pmd_vmxnet3_uio.a 的符号链接或拷贝
     if [ ! -f "/usr/local/lib/librte_pmd_vmxnet3_uio.a" ]; then
@@ -92,24 +63,43 @@ if [ "$vmxnet3_lib_found" = true ]; then
         echo "   ✅ librte_pmd_vmxnet3_uio.a 已存在"
     fi
 else
-    # 尝试从构建目录查找
-    echo "   尝试从构建目录查找 VMXNet3 驱动..."
-    for search_path in "$DPDK_SRC_DIR/build/drivers/net/vmxnet3" "$DPDK_SRC_DIR/build/lib" "$DPDK_SRC_DIR/build"; do
-        vmxnet3_files=$(find "$search_path" -name "*vmxnet3*" -type f 2>/dev/null || true)
-        if [ -n "$vmxnet3_files" ]; then
-            echo "   找到VMXNet3相关文件:"
-            echo "$vmxnet3_files" | while read file; do
-                echo "     - $file"
-                # 如果是库文件，拷贝到 /usr/local/lib/
-                if [[ "$file" == *.a || "$file" == *.so* ]]; then
-                    cp "$file" "/usr/local/lib/librte_pmd_vmxnet3_uio.a"
-                    echo "   ✅ 已拷贝: $(basename $file) -> /usr/local/lib/librte_pmd_vmxnet3_uio.a"
+    # 尝试从构建目录和其他可能位置查找
+    echo "   尝试从已安装目录查找 VMXNet3 驱动..."
+    search_paths=(
+        "$DPDK_SRC_DIR/build/drivers/net/vmxnet3"
+        "$DPDK_SRC_DIR/build/lib"
+        "$DPDK_SRC_DIR/build"
+        "/usr/local/lib/x86_64-linux-gnu"
+        "/usr/lib/x86_64-linux-gnu"
+        "/usr/local/lib"
+        "/usr/lib"
+    )
+    
+    found_vmxnet3=false
+    for search_path in "${search_paths[@]}"; do
+        if [ -d "$search_path" ]; then
+            vmxnet3_files=$(find "$search_path" -name "*vmxnet3*.a" -type f 2>/dev/null || true)
+            if [ -n "$vmxnet3_files" ]; then
+                echo "   找到VMXNet3库文件:"
+                echo "$vmxnet3_files" | while read file; do
+                    echo "     - $file"
+                    if [ ! -f "/usr/local/lib/librte_pmd_vmxnet3_uio.a" ]; then
+                        cp "$file" "/usr/local/lib/librte_pmd_vmxnet3_uio.a"
+                        echo "   ✅ 已拷贝: $(basename $file) -> /usr/local/lib/librte_pmd_vmxnet3_uio.a"
+                        found_vmxnet3=true
+                    fi
+                done
+                if [ "$found_vmxnet3" = true ]; then
                     break
                 fi
-            done
-            break
+            fi
         fi
     done
+    
+    if [ "$found_vmxnet3" = false ]; then
+        echo "   ⚠️  未找到VMXNet3相关库文件"
+        echo "      可能需要先运行: sudo ./setup-dpdk.sh --compile-only"
+    fi
 fi
 
 # 确保 /usr/local/lib 在库搜索路径中
@@ -119,7 +109,7 @@ if [ ! -f "/usr/local/lib/librte_pmd_vmxnet3_uio.a" ]; then
 fi
 
 # 检查UIO相关库 (注意: 新版本DPDK中UIO库命名可能不同)
-echo "6. 检查UIO相关库:"
+echo "3. 检查UIO相关库:"
 find "$dpdk_lib_path" -name "*uio*" 2>/dev/null | while read lib; do
     echo "     ✅ $(basename $lib)"
 done
@@ -130,7 +120,7 @@ if [ ! -f "$dpdk_lib_path/librte_pmd_vmxnet3_uio.a" ] && [ ! -f "/usr/local/lib/
     echo "     ℹ️  未找到UIO相关库文件"
 fi
 
-echo "7. 更新环境变量..."
+echo "4. 更新环境变量..."
 cat > /tmp/dpdk-env.sh << 'EOF'
 # DPDK 环境变量
 export CGO_CFLAGS="$(pkg-config --cflags libdpdk)"
@@ -148,7 +138,6 @@ echo "1. 加载环境变量: source /tmp/dpdk-env.sh"
 echo "2. 重新编译项目: CGO_LDFLAGS_ALLOW='-Wl,.*' go build"
 echo ""
 echo "如果仍有问题，请检查:"
-echo "- 系统是否支持VMXNet3网卡"
-echo "- 是否在VMware虚拟机中运行"
-echo "- 编译日志是否有错误信息"
 echo "- /usr/local/lib/librte_pmd_vmxnet3_uio.a 是否存在"
+echo "- 是否需要先运行: sudo ./setup-dpdk.sh --compile-only"
+echo "- 系统是否支持VMXNet3网卡 (仅VMware虚拟机需要)"
