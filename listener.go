@@ -2,42 +2,33 @@ package dpdknet
 
 import (
 	"errors"
-	"sync"
+	"net"
 )
 
-type Listener struct {
-	pc      *UDPConn
-	connCh  chan *UDPConn
-	closed  bool
-	mu      sync.Mutex
+// Listen announces on the local network address.
+func Listen(network, address string) (net.Listener, error) {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		addr, err := ResolveTCPAddr(network, address)
+		if err != nil {
+			return nil, err
+		}
+		return ListenTCP(network, addr)
+	default:
+		return nil, errors.New("unsupported network type: " + network)
+	}
 }
 
-func Listen(port uint16) (*Listener, error) {
-	pc, err := ListenUDP(port)
-	if err != nil {
-		return nil, err
+// ListenPacket announces on the local network address.
+func ListenPacket(network, address string) (net.PacketConn, error) {
+	switch network {
+	case "udp", "udp4", "udp6":
+		addr, err := ResolveUDPAddr(network, address)
+		if err != nil {
+			return nil, err
+		}
+		return ListenUDP(network, addr)
+	default:
+		return nil, errors.New("unsupported network type: " + network)
 	}
-	l := &Listener{
-		pc:     pc,
-		connCh: make(chan *UDPConn, 1024),
-	}
-	go func() { l.connCh <- pc }()
-	return l, nil
-}
-
-func (l *Listener) Accept() (*UDPConn, error) {
-	if l.closed {
-		return nil, errors.New("listener closed")
-	}
-	return <-l.connCh, nil
-}
-
-func (l *Listener) Close() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.closed {
-		return nil
-	}
-	l.closed = true
-	return l.pc.Close()
 }

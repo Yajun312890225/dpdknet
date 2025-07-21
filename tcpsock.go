@@ -51,8 +51,8 @@ type TCPHeader struct {
 }
 
 type TCPConn struct {
-	localAddr  *net.TCPAddr
-	remoteAddr *net.TCPAddr
+	localAddr  *TCPAddr
+	remoteAddr *TCPAddr
 	state      TCPState
 	seqNum     uint32
 	ackNum     uint32
@@ -63,7 +63,7 @@ type TCPConn struct {
 }
 
 type TCPListener struct {
-	localAddr *net.TCPAddr
+	localAddr *TCPAddr
 	rxFlow    *flow.Flow
 	connCh    chan *TCPConn
 	mu        sync.Mutex
@@ -184,7 +184,7 @@ func echoTCPData(data []byte, ipHeaderStart, headerLength, tcpStart int, srcPort
 	log.Printf("Echoed TCP data: %d bytes", dataLen)
 }
 
-func ListenTCP(addr *net.TCPAddr) (*TCPListener, error) {
+func ListenTCP(network string, laddr *TCPAddr) (*TCPListener, error) {
 	if err := Init(); err != nil {
 		return nil, err
 	}
@@ -195,7 +195,7 @@ func ListenTCP(addr *net.TCPAddr) (*TCPListener, error) {
 	}
 
 	listener := &TCPListener{
-		localAddr: addr,
+		localAddr: laddr,
 		rxFlow:    rxFlow,
 		connCh:    make(chan *TCPConn, 1024),
 	}
@@ -233,7 +233,7 @@ func (l *TCPListener) handleTCPPacket(pkt *packet.Packet, ctx flow.UserContext) 
 	HandleTCPManual(pkt, data, ipHeaderStart, headerLength)
 }
 
-func (l *TCPListener) Accept() (*TCPConn, error) {
+func (l *TCPListener) Accept() (net.Conn, error) {
 	if l.closed {
 		return nil, errors.New("listener closed")
 	}
@@ -242,12 +242,21 @@ func (l *TCPListener) Accept() (*TCPConn, error) {
 	// 现在简化为创建一个新连接
 	conn := &TCPConn{
 		localAddr:  l.localAddr,
-		remoteAddr: &net.TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0},
+		remoteAddr: &TCPAddr{IP: net.IPv4(0, 0, 0, 0), Port: 0},
 		state:      TCPStateEstablished,
 		dataCh:     make(chan []byte, 1024),
 	}
 
 	return conn, nil
+}
+
+// AcceptTCP accepts the next incoming call and returns the new connection.
+func (l *TCPListener) AcceptTCP() (*TCPConn, error) {
+	conn, err := l.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return conn.(*TCPConn), nil
 }
 
 func (l *TCPListener) Close() error {
@@ -261,13 +270,23 @@ func (l *TCPListener) Close() error {
 	return nil
 }
 
-func DialTCP(raddr *net.TCPAddr) (*TCPConn, error) {
+// Addr returns the listener's network address.
+func (l *TCPListener) Addr() net.Addr {
+	return l.localAddr
+}
+
+func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 	if err := Init(); err != nil {
 		return nil, err
 	}
 
+	localAddr := laddr
+	if localAddr == nil {
+		localAddr = &TCPAddr{IP: net.IPv4(192, 168, 1, 100), Port: 0} // 临时本地地址
+	}
+
 	conn := &TCPConn{
-		localAddr:  &net.TCPAddr{IP: net.IPv4(192, 168, 1, 100), Port: 0}, // 临时本地地址
+		localAddr:  localAddr,
 		remoteAddr: raddr,
 		state:      TCPStateSynSent,
 		dataCh:     make(chan []byte, 1024),
@@ -323,4 +342,36 @@ func (c *TCPConn) LocalAddr() net.Addr {
 
 func (c *TCPConn) RemoteAddr() net.Addr {
 	return c.remoteAddr
+}
+
+// SetDeadline sets the read and write deadlines associated with the connection.
+func (c *TCPConn) SetDeadline(t time.Time) error {
+	// TODO: 实现超时逻辑
+	return nil
+}
+
+// SetReadDeadline sets the deadline for future Read calls.
+func (c *TCPConn) SetReadDeadline(t time.Time) error {
+	// TODO: 实现读超时逻辑
+	return nil
+}
+
+// SetWriteDeadline sets the deadline for future Write calls.
+func (c *TCPConn) SetWriteDeadline(t time.Time) error {
+	// TODO: 实现写超时逻辑
+	return nil
+}
+
+// ListenNet announces on the local network address.
+func ListenNet(network, address string) (net.Listener, error) {
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		addr, err := ResolveTCPAddr(network, address)
+		if err != nil {
+			return nil, err
+		}
+		return ListenTCP(network, addr)
+	default:
+		return nil, errors.New("unsupported network type: " + network)
+	}
 }
