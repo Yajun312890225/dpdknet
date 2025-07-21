@@ -159,7 +159,7 @@ func TestDropInReplacement(t *testing.T) {
 
 	// 替换后的代码模式：
 	// import net "github.com/Yajun312890225/dpdknet"
-	// listener, err := net.ListenNet("tcp", ":8080")  // 注意：这里用ListenNet
+	// listener, err := net.Listen("tcp", ":8080")  // 完全兼容标准库
 	// conn, err := net.Dial("tcp", "localhost:8080")
 
 	t.Log("Drop-in replacement test passed - API signatures are compatible")

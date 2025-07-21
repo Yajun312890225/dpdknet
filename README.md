@@ -168,7 +168,7 @@ find . -name "*.go" -exec sed -i 's/import "net"/import net "github.com\/Yajun31
 
 | 标准库 | DPDK Net | 兼容性 | 说明 |
 |--------|----------|--------|------|
-| `net.Listen()` | `dpdknet.ListenNet()` | ⚠️ 函数名不同 | 功能相同，名称稍异 |
+| `net.Listen()` | `dpdknet.Listen()` | ✅ 完全兼容 | 功能和接口相同 |
 | `net.Dial()` | `dpdknet.Dial()` | ✅ 完全兼容 | 相同签名和功能 |
 | `net.ResolveTCPAddr()` | `dpdknet.ResolveTCPAddr()` | ✅ 完全兼容 | 相同签名 |
 | `net.ResolveUDPAddr()` | `dpdknet.ResolveUDPAddr()` | ✅ 完全兼容 | 相同签名 |
@@ -214,7 +214,7 @@ import (
 )
 
 func main() {
-    listener, err := net.ListenNet("tcp", ":8080")  // 注意：ListenNet
+    listener, err := net.Listen("tcp", ":8080")  // 标准库兼容
     if err != nil {
         panic(err)
     }
@@ -293,6 +293,9 @@ dpdknet/
 ├── *_test.go                    # 完整测试套件
 └── examples/                    # 示例代码
     ├── README.md                # 示例总览
+    ├── listen-demo/             # Listen函数兼容性演示
+    │   ├── main.go
+    │   └── README.md
     ├── tcpserver/               # TCP 服务器示例
     │   ├── main.go
     │   ├── go.mod
@@ -615,7 +618,7 @@ go test -bench=. -benchmem ./...
 ### ⚠️ 重要注意事项
 
 ### 1. 函数差异
-- `net.Listen()` → `dpdknet.ListenNet()` （避免与listener.go中的函数冲突）
+- `net.Listen()` → `dpdknet.Listen()` （完全兼容标准库API）
 - 其他函数保持完全兼容
 
 ### 2. 环境依赖

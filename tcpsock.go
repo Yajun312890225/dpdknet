@@ -265,20 +265,6 @@ func (c *TCPConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-// ListenNet announces on the local network address.
-func ListenNet(network, address string) (net.Listener, error) {
-	switch network {
-	case "tcp", "tcp4", "tcp6":
-		addr, err := ResolveTCPAddr(network, address)
-		if err != nil {
-			return nil, err
-		}
-		return ListenTCP(network, addr)
-	default:
-		return nil, errors.New("unsupported network type: " + network)
-	}
-}
-
 // HandleTCPPacket 处理TCP数据包 (由network.go调用)
 func HandleTCPPacket(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP) {
 	tcpStart := ipHeaderStart + headerLength
