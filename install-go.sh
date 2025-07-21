@@ -115,9 +115,32 @@ if [ "$download_success" = false ]; then
     fi
 fi
 
-# 方法5: 使用代理 (如果设置了)
+# 方法5: 腾讯云镜像源 (HTTP)
+if [ "$download_success" = false ]; then
+    echo "5. 尝试腾讯云镜像源 (HTTP)..."
+    if wget --timeout=30 --tries=3 --continue --progress=bar \
+       http://mirrors.cloud.tencent.com/golang/go1.19.13.linux-amd64.tar.gz; then
+        download_success=true
+        echo "✅ 腾讯云镜像源下载成功"
+    fi
+fi
+
+# 方法6: 直接使用IP地址 (绕过DNS问题)
+if [ "$download_success" = false ]; then
+    echo "6. 尝试使用IP地址直接下载..."
+    # go.dev的一个IP地址 (可能会变化)
+    if curl -L -k --connect-timeout 30 --max-time 300 --progress-bar \
+       --resolve go.dev:443:216.239.38.21 \
+       -o go1.19.13.linux-amd64.tar.gz \
+       https://go.dev/dl/go1.19.13.linux-amd64.tar.gz; then
+        download_success=true
+        echo "✅ IP地址直接下载成功"
+    fi
+fi
+
+# 方法7: 使用代理 (如果设置了)
 if [ "$download_success" = false ] && [ ! -z "$http_proxy" ]; then
-    echo "5. 尝试使用代理下载..."
+    echo "7. 尝试使用代理下载..."
     if wget --timeout=30 --tries=2 --progress=bar \
        https://go.dev/dl/go1.19.13.linux-amd64.tar.gz; then
         download_success=true
@@ -125,7 +148,7 @@ if [ "$download_success" = false ] && [ ! -z "$http_proxy" ]; then
     fi
 fi
 
-# 方法6: 手动下载提示
+# 方法8: 手动下载提示
 if [ "$download_success" = false ]; then
     echo ""
     echo "❌ 自动下载失败"
@@ -137,7 +160,10 @@ if [ "$download_success" = false ]; then
     echo ""
     echo "解决方案:"
     echo ""
-    echo "方案1: 运行SSL证书修复脚本"
+    echo "方案1: 使用专门的手动下载脚本"
+    echo "  ./download-go-manual.sh  # 尝试多个镜像源"
+    echo ""
+    echo "方案2: 运行SSL证书修复脚本"
     echo "  sudo ./fix-ssl-certs.sh"
     echo ""
     echo "请尝试以下手动下载方法之一:"
@@ -179,9 +205,38 @@ if [ ! -f "go1.19.13.linux-amd64.tar.gz" ]; then
 fi
 
 file_size=$(stat -c%s "go1.19.13.linux-amd64.tar.gz" 2>/dev/null || echo 0)
+echo "下载文件大小: ${file_size} bytes"
+
 if [ $file_size -lt 100000000 ]; then  # 小于100MB说明下载不完整
     echo "❌ 下载文件不完整 (大小: ${file_size} bytes)"
-    echo "正常大小应该约150MB"
+    echo "正常大小应该约150MB (150,000,000+ bytes)"
+    
+    # 显示文件内容前100个字符以帮助诊断
+    echo ""
+    echo "文件内容预览 (前100个字符):"
+    head -c 100 go1.19.13.linux-amd64.tar.gz 2>/dev/null | cat -v || echo "无法读取文件内容"
+    
+    # 检查是否是HTML错误页面
+    if head -c 50 go1.19.13.linux-amd64.tar.gz 2>/dev/null | grep -q "<!DOCTYPE\|<html\|<HTML"; then
+        echo ""
+        echo "⚠️  检测到HTML内容，可能是错误页面或重定向页面"
+        echo "这通常表示网络环境有防火墙或代理限制"
+    fi
+    
+    rm -f go1.19.13.linux-amd64.tar.gz
+    echo ""
+    echo "建议尝试:"
+    echo "1. 运行SSL证书修复: sudo ./fix-ssl-certs.sh"
+    echo "2. 检查网络代理设置"
+    echo "3. 使用浏览器手动下载"
+    echo "4. 尝试不同的网络环境"
+    exit 1
+fi
+
+# 验证文件是否为有效的gzip格式
+if ! file go1.19.13.linux-amd64.tar.gz | grep -q "gzip compressed"; then
+    echo "❌ 下载的文件不是有效的gzip格式"
+    echo "文件类型: $(file go1.19.13.linux-amd64.tar.gz)"
     rm -f go1.19.13.linux-amd64.tar.gz
     exit 1
 fi

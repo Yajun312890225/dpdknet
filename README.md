@@ -314,6 +314,8 @@ dpdknet/
 | `setup-dpdk.sh` | 完整DPDK环境配置 | 一键配置所有环境 |
 | `setup-dpdk.sh --compile-only` | 仅编译环境配置 | 开发/测试阶段，无需绑定网卡 |
 | `install-go.sh` | 专门安装Go环境 | 解决Go下载问题 |
+| `download-go-manual.sh` | Go安装包手动下载 | 网络受限环境下载Go |
+| `test-network.sh` | 网络连接测试 | 诊断网络和下载问题 |
 | `fix-ssl-certs.sh` | SSL证书问题修复 | 解决下载时的SSL验证错误 |
 | `check-dpdk-env.sh` | 环境诊断检查 | 排查配置问题 |
 | `fix-dpdk-drivers.sh` | 驱动库修复 | 解决网卡驱动缺失问题 |
@@ -415,11 +417,16 @@ cd examples/icmpclient && go build && sudo ./icmpclient 8.8.8.8
 # 方法1: 使用专门的Go安装脚本
 sudo ./install-go.sh
 
-# 方法2: SSL证书问题修复
+# 方法2: 网络问题诊断和专用下载
+./test-network.sh        # 先测试网络连接
+./download-go-manual.sh  # 使用多镜像源下载
+sudo ./install-go.sh     # 安装已下载的Go
+
+# 方法3: SSL证书问题修复
 sudo ./fix-ssl-certs.sh  # 修复SSL证书问题
 sudo ./install-go.sh     # 重新尝试安装
 
-# 方法3: 手动下载Go
+# 方法4: 手动下载Go
 wget https://go.dev/dl/go1.19.13.linux-amd64.tar.gz
 sudo tar -C /usr/local -xzf go1.19.13.linux-amd64.tar.gz
 export PATH=/usr/local/go/bin:$PATH
