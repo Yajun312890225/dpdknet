@@ -3,180 +3,49 @@ package dpdknet
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"sync"
 	"time"
 
-	"github.com/Yajun312890225/nff-go/flow"
 	"github.com/Yajun312890225/nff-go/packet"
 	"github.com/Yajun312890225/nff-go/types"
 )
 
 type UDPConn struct {
-	localAddr  *UDPAddr
-	remoteAddr *UDPAddr
-	rxFlow     *flow.Flow
-	txFlow     *flow.Flow
-	txPort     uint16
-	recvCh     chan []byte
-	sendCh     chan *packet.Packet
-	mu         sync.Mutex
-	closed     bool
+	localAddr   *UDPAddr
+	remoteAddr  *UDPAddr
+	recvCh      chan []byte
+	mu          sync.Mutex
+	closed      bool
+	listenerKey string // 用于从全局路由器注销
 }
 
 func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	log.Printf("[DEBUG] ListenUDP called with network=%s, laddr=%v", network, laddr)
 
-	if err := Init(); err != nil {
-		log.Printf("[ERROR] DPDK Init failed: %v", err)
+	// 确保全局DPDK系统已初始化
+	if err := EnsureGlobalNetworkInit(); err != nil {
+		log.Printf("[ERROR] Global network init failed: %v", err)
 		return nil, err
 	}
-	log.Printf("[DEBUG] DPDK Init successful")
-
-	// DPDK使用物理端口ID，通常从0开始，而不是UDP端口号
-	dpdkPort := uint16(0) // 默认使用第一个DPDK端口
-	log.Printf("[DEBUG] Using DPDK port %d for receiving", dpdkPort)
-
-	rxFlow, err := flow.SetReceiver(dpdkPort)
-	if err != nil {
-		log.Printf("[ERROR] Failed to set receiver on DPDK port %d: %v", dpdkPort, err)
-		return nil, err
-	}
-	log.Printf("[DEBUG] Successfully set receiver on DPDK port %d", dpdkPort)
 
 	c := &UDPConn{
 		localAddr: laddr,
-		rxFlow:    rxFlow,
-		txPort:    dpdkPort, // 这里存储的是DPDK端口ID，不是UDP端口号
 		recvCh:    make(chan []byte, 4096),
-		sendCh:    make(chan *packet.Packet, 1024),
 	}
-	log.Printf("[DEBUG] Created UDPConn with localAddr=%v, txPort=%d", laddr, dpdkPort)
+	log.Printf("[DEBUG] Created UDPConn with localAddr=%v", laddr)
 
-	flow.SetHandler(rxFlow, func(pkt *packet.Packet, ctx flow.UserContext) {
-		data := pkt.GetRawPacketBytes()
-		log.Printf("[DEBUG] Received packet, raw length=%d bytes", len(data))
-
-		// 检查以太网帧长度
-		if len(data) < 42 { // 以太网头(14) + IP头(20) + UDP头(8)
-			log.Printf("[DEBUG] Packet too short: %d bytes, need at least 42", len(data))
-			return
-		}
-
-		// 检查是否为IP协议 (EtherType = 0x0800)
-		if data[12] != 0x08 || data[13] != 0x00 {
-			log.Printf("[DEBUG] Not IPv4 packet: EtherType=0x%02x%02x", data[12], data[13])
-			return
-		}
-		log.Printf("[DEBUG] IPv4 packet detected")
-
-		ipHeaderStart := 14
-
-		// 检查是否为UDP协议 (Protocol = 17)
-		if data[ipHeaderStart+9] != 17 {
-			log.Printf("[DEBUG] Not UDP packet: Protocol=%d", data[ipHeaderStart+9])
-			return
-		}
-		log.Printf("[DEBUG] UDP packet detected")
-
-		// 计算IP头长度
-		headerLength := int((data[ipHeaderStart] & 0x0F) * 4)
-		udpStart := ipHeaderStart + headerLength
-		log.Printf("[DEBUG] IP header length=%d, UDP start at offset=%d", headerLength, udpStart)
-
-		// 检查UDP头长度
-		if len(data) < udpStart+8 {
-			log.Printf("[DEBUG] Packet too short for UDP header: %d bytes, need %d", len(data), udpStart+8)
-			return
-		}
-
-		// 解析UDP头
-		srcPort := binary.BigEndian.Uint16(data[udpStart : udpStart+2])
-		dstPort := binary.BigEndian.Uint16(data[udpStart+2 : udpStart+4])
-		udpLen := binary.BigEndian.Uint16(data[udpStart+4 : udpStart+6])
-		log.Printf("[DEBUG] UDP header: src_port=%d, dst_port=%d, udp_len=%d", srcPort, dstPort, udpLen)
-
-		// 如果指定了本地端口，检查目标端口是否匹配
-		if laddr != nil && laddr.Port != 0 && int(dstPort) != laddr.Port {
-			log.Printf("[DEBUG] Port mismatch: received dst_port=%d, expected=%d", dstPort, laddr.Port)
-			return
-		}
-
-		// 提取目标IP地址
-		dstIP := net.IPv4(data[ipHeaderStart+16], data[ipHeaderStart+17],
-			data[ipHeaderStart+18], data[ipHeaderStart+19])
-		srcIP := net.IPv4(data[ipHeaderStart+12], data[ipHeaderStart+13],
-			data[ipHeaderStart+14], data[ipHeaderStart+15])
-		log.Printf("[DEBUG] IP addresses: src=%s, dst=%s", srcIP.String(), dstIP.String())
-
-		// 如果指定了本地地址，检查目标IP是否匹配
-		if laddr != nil && laddr.IP != nil && !laddr.IP.IsUnspecified() {
-			if !dstIP.Equal(laddr.IP) {
-				log.Printf("[DEBUG] IP mismatch: received dst_ip=%s, expected=%s", dstIP.String(), laddr.IP.String())
-				return
-			}
-		}
-
-		// 验证UDP长度
-		expectedLen := len(data) - udpStart
-		if int(udpLen) != expectedLen {
-			log.Printf("[WARNING] UDP length mismatch: header=%d, actual=%d", udpLen, expectedLen)
-		}
-
-		// 只有匹配的数据包才会被接收
-		buf := make([]byte, len(data))
-		copy(buf, data)
-		log.Printf("[DEBUG] Packet passed all filters, queuing for application (payload_len=%d)", len(data)-udpStart-8)
-
-		select {
-		case c.recvCh <- buf:
-			log.Printf("[DEBUG] Packet successfully queued")
-		default:
-			// 如果缓冲区满了，丢弃数据包
-			log.Printf("[WARNING] UDP receive buffer full, dropping packet from port %d", srcPort)
-		}
-	}, nil)
-
-	log.Printf("[DEBUG] Handler set successfully")
-
-	if err := flow.SetSender(rxFlow, dpdkPort); err != nil {
+	// 注册UDP监听器到全局路由器
+	key := fmt.Sprintf("udp:%s:%d", laddr.IP.String(), laddr.Port)
+	c.listenerKey = key
+	if err := RegisterUDPListener(key, c); err != nil {
+		log.Printf("[ERROR] Failed to register UDP listener: %v", err)
 		return nil, err
 	}
 
-	// 创建独立的发送流
-	log.Printf("[DEBUG] Creating TX flow...")
-	txFlow := flow.SetGenerator(func(pkt *packet.Packet, ctx flow.UserContext) {
-		select {
-		case sendPkt := <-c.sendCh:
-			// 复制数据包内容到生成的数据包
-			*pkt = *sendPkt
-			log.Printf("[DEBUG] Generator: packet prepared for sending")
-		default:
-			// 没有数据包要发送，生成一个空包
-			packet.InitEmptyPacket(pkt, 0)
-		}
-	}, nil)
-	c.txFlow = txFlow
-	log.Printf("[DEBUG] TX flow created successfully")
-	if err := flow.SetSender(txFlow, dpdkPort); err != nil {
-		return nil, err
-	}
-
-	// 启动DPDK数据包处理系统
-	// 这必须在所有流和处理器设置完成后调用
-	if !IsStarted() {
-		log.Printf("[DEBUG] Starting DPDK packet processing system...")
-		if err := SystemStart(); err != nil {
-			log.Printf("[ERROR] Failed to start DPDK system: %v", err)
-			return nil, err
-		}
-		log.Printf("[DEBUG] DPDK system started successfully")
-	} else {
-		log.Printf("[DEBUG] DPDK system already started")
-	}
-
-	log.Printf("[DEBUG] Returning UDPConn")
+	log.Printf("[DEBUG] UDP listener registered for %s", key)
 	return c, nil
 }
 
@@ -306,17 +175,16 @@ func (c *UDPConn) WriteToUDP(buf []byte, addr *UDPAddr) (int, error) {
 	ipv4Hdr.HdrChecksum = packet.SwapBytesUint16(checksum)
 	log.Printf("[DEBUG] Calculated IP header checksum: 0x%04x", checksum)
 
-	// 通过发送通道发送数据包
-	log.Printf("[DEBUG] Sending packet through TX channel...")
-	select {
-	case c.sendCh <- pkt:
-		log.Printf("[INFO] UDP packet sent to %s:%d (len=%d)", addr.IP.String(), addr.Port, len(buf))
-		log.Printf("[DEBUG] WriteToUDP completed successfully")
-		return len(buf), nil
-	default:
-		log.Printf("[ERROR] Send channel full, dropping packet")
-		return 0, errors.New("send buffer full")
+	// 通过全局发送通道发送数据包
+	log.Printf("[DEBUG] Sending packet through global TX channel...")
+	if err := SendPacket(pkt); err != nil {
+		log.Printf("[ERROR] Failed to send packet: %v", err)
+		return 0, err
 	}
+
+	log.Printf("[INFO] UDP packet sent to %s:%d (len=%d)", addr.IP.String(), addr.Port, len(buf))
+	log.Printf("[DEBUG] WriteToUDP completed successfully")
+	return len(buf), nil
 }
 
 // Write writes data to the connection.
@@ -346,8 +214,13 @@ func (c *UDPConn) Close() error {
 		return nil
 	}
 	c.closed = true
+
+	// 从全局路由器注销监听器
+	if c.listenerKey != "" {
+		UnregisterUDPListener(c.listenerKey)
+	}
+
 	close(c.recvCh)
-	close(c.sendCh)
 	log.Printf("[DEBUG] Connection closed successfully")
 	return nil
 }
