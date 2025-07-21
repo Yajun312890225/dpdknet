@@ -59,21 +59,18 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	txFlow := flow.SetGenerator(func(pkt *packet.Packet, ctx flow.UserContext) {
 		select {
 		case sendPkt := <-c.sendCh:
-			// 复制数据包内容
-			pkt.Ether = sendPkt.Ether
-			pkt.Data = sendPkt.Data
-			pkt.Next = sendPkt.Next
-			pkt.CMbuf = sendPkt.CMbuf
+			// 复制数据包内容到生成的数据包
+			*pkt = *sendPkt
 			log.Printf("[DEBUG] Generator: packet prepared for sending")
 		default:
 			// 没有数据包要发送，生成一个空包
 			packet.InitEmptyPacket(pkt, 0)
 		}
 	}, nil)
-	log.Printf("[DEBUG] TX flow created successfully")
 	c.txFlow = txFlow
+	log.Printf("[DEBUG] TX flow created successfully")
 
-	// 设置发送器
+	// 设置发送器 - 这是流的终止点
 	log.Printf("[DEBUG] Setting TX sender to port %d", dpdkPort)
 	err = flow.SetSender(txFlow, dpdkPort)
 	if err != nil {
@@ -167,15 +164,6 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	}, nil)
 
 	log.Printf("[DEBUG] Handler set successfully")
-
-	// 设置Stopper来关闭流 - 这是必需的，否则SystemStart会失败
-	log.Printf("[DEBUG] Setting flow stopper...")
-	err = flow.SetStopper(rxFlow)
-	if err != nil {
-		log.Printf("[ERROR] Failed to set flow stopper: %v", err)
-		return nil, err
-	}
-	log.Printf("[DEBUG] Flow stopper set successfully")
 
 	// 启动DPDK数据包处理系统
 	// 这必须在所有流和处理器设置完成后调用
