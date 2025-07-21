@@ -33,6 +33,26 @@
 go get github.com/Yajun312890225/dpdknet
 ```
 
+### 🔧 环境配置
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/Yajun312890225/dpdknet.git
+cd dpdknet
+
+# 2. 检查环境 (可选)
+./check-dpdk-env.sh
+
+# 3. 自动配置 DPDK 环境
+sudo ./setup-dpdk.sh eth0  # 替换 eth0 为你的网卡名
+
+# 4. 加载环境变量
+source /tmp/dpdk-env.sh
+
+# 5. 编译项目
+CGO_LDFLAGS_ALLOW='-Wl,.*' go build
+```
+
 ### 📝 简单示例
 
 ```go
@@ -255,6 +275,8 @@ conn.WriteToUDP(buffer[:n], addr)       // 方法名相同
 dpdknet/
 ├── README.md                    # 项目文档
 ├── go.mod                       # Go 模块文件
+├── setup-dpdk.sh                # DPDK 自动配置脚本
+├── check-dpdk-env.sh            # 环境检查脚本
 ├── *.go                         # 核心网络实现
 ├── *_test.go                    # 完整测试套件
 └── examples/                    # 示例代码
@@ -339,60 +361,164 @@ cd examples/icmpclient && go build && sudo ./icmpclient 8.8.8.8
 
 ### DPDK 环境配置
 
-#### 1. 安装 DPDK
+> 💡 **快速配置**：我们提供了自动化配置脚本，可以一键完成环境配置：
+> ```bash
+> # 下载项目后运行配置脚本
+> sudo ./setup-dpdk.sh eth0  # 替换 eth0 为你的网卡名
+> source /tmp/dpdk-env.sh    # 加载环境变量
+> ```
+
+#### 手动配置步骤
+
+#### 1. 安装依赖和Go环境
 
 ```bash
-# Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install dpdk dpdk-dev
+# 安装编译工具和依赖
+sudo apt install -y build-essential meson ninja-build pkg-config libnuma-dev
 
-# CentOS/RHEL
-sudo yum install dpdk dpdk-devel
+# 安装 Go 1.19+ (如果系统版本过低)
+wget https://go.dev/dl/go1.19.13.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.19.13.linux-amd64.tar.gz
+export PATH=/usr/local/go/bin:$PATH
+echo 'export PATH=/usr/local/go/bin:$PATH' >> ~/.bashrc
 
-# 从源码编译
-wget http://fast.dpdk.org/rel/dpdk-20.11.3.tar.xz
-tar xf dpdk-20.11.3.tar.xz
-cd dpdk-20.11.3
-meson build
-cd build && ninja && sudo ninja install
+# 验证安装
+go version
 ```
 
-#### 2. 配置 Hugepages
+#### 2. 从源码安装 DPDK
 
 ```bash
-# 配置 2MB hugepages
+# 下载并编译 DPDK 19.11.14 (稳定版本)
+sudo wget http://fast.dpdk.org/rel/dpdk-19.11.14.tar.xz
+sudo tar xf dpdk-19.11.14.tar.xz
+cd dpdk-19.11.14
+
+# 使用 meson 构建系统
+sudo meson build
+cd build
+sudo ninja
+sudo ninja install
+sudo ldconfig
+
+# 验证安装
+pkg-config --exists libdpdk && echo "DPDK 安装成功" || echo "DPDK 安装失败"
+```
+
+#### 3. 配置 Hugepages
+
+```bash
+# 配置 2MB hugepages (至少1GB)
 echo 1024 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
 
-# 或配置 1GB hugepages (推荐)
+# 或配置 1GB hugepages (推荐，更高性能)
 echo 4 > /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages
 
 # 挂载 hugepages
 mkdir -p /mnt/huge
 mount -t hugetlbfs nodev /mnt/huge
+
+# 验证 hugepages 配置
+cat /proc/meminfo | grep -i huge
 ```
 
-#### 3. 绑定网卡
+#### 4. 查找和绑定网卡
 
 ```bash
-# 查看网卡状态
-dpdk-devbind.py --status
+# 方法1: 查看所有网络接口
+ip link show
 
-# 绑定网卡到 DPDK
-dpdk-devbind.py --bind=uio_pci_generic 0000:01:00.0
+# 方法2: 查看网卡详细信息和PCI地址
+lspci | grep -i ethernet
+# 或者更详细的信息
+lspci -v | grep -i ethernet -A 5
 
-# 或使用 vfio-pci (推荐)
-modprobe vfio-pci
-dpdk-devbind.py --bind=vfio-pci 0000:01:00.0
+# 方法3: 使用ethtool查看网卡信息
+sudo ethtool -i <interface_name>  # 如: sudo ethtool -i eth0
+
+# 方法4: 直接查看PCI设备
+ls /sys/class/net/*/device | xargs -I {} readlink -f {} | sed 's|.*/||'
+
+# 加载UIO驱动
+sudo modprobe uio_pci_generic
+
+# 绑定网卡到 DPDK (替换为你的实际PCI地址)
+# 首先找到dpdk-devbind.py的位置
+find /usr -name "dpdk-devbind.py" 2>/dev/null
+# 或者在构建目录中
+find ./dpdk-19.11.14 -name "dpdk-devbind.py"
+
+# 绑定网卡 (示例PCI地址: 0000:00:08.0)
+sudo ./dpdk-devbind.py -b uio_pci_generic 0000:00:08.0
+
+# 查看绑定状态
+sudo ./dpdk-devbind.py --status
+
+# 或使用 vfio-pci (推荐，更安全)
+sudo modprobe vfio-pci
+sudo ./dpdk-devbind.py -b vfio-pci 0000:00:08.0
 ```
 
-#### 4. 验证配置
+#### 5. 设置编译环境
 
 ```bash
-# 检查 hugepages
+# 设置编译环境变量
+export CGO_CFLAGS="$(pkg-config --cflags libdpdk)"
+export CGO_LDFLAGS="$(pkg-config --libs libdpdk)"
+
+# 添加到 bashrc 以持久化
+echo 'export CGO_CFLAGS="$(pkg-config --cflags libdpdk)"' >> ~/.bashrc
+echo 'export CGO_LDFLAGS="$(pkg-config --libs libdpdk)"' >> ~/.bashrc
+
+# 编译项目
+CGO_LDFLAGS_ALLOW='-Wl,.*' go build
+```
+
+#### 6. 验证配置
+
+```bash
+# 检查 hugepages 配置
 cat /proc/meminfo | grep -i huge
 
-# 检查 DPDK 环境
-dpdk-hugepages.py --show
+# 检查 DPDK 安装
+pkg-config --exists libdpdk && echo "DPDK 已安装" || echo "DPDK 未安装"
+pkg-config --modversion libdpdk  # 显示DPDK版本
+
+# 检查网卡绑定状态
+sudo ./dpdk-devbind.py --status
+
+# 检查Go和环境变量
+go version
+echo $CGO_CFLAGS
+echo $CGO_LDFLAGS
+
+# 测试编译
+CGO_LDFLAGS_ALLOW='-Wl,.*' go build -v
+```
+
+#### 常用的网卡查找命令
+
+```bash
+# 查看所有网络接口
+ip link show
+
+# 查看网卡PCI地址和驱动信息  
+lspci | grep -i ethernet
+lspci -v | grep -i ethernet -A 5
+
+# 查看具体网卡的PCI信息
+sudo ethtool -i eth0  # 替换eth0为实际网卡名
+
+# 查看所有网卡的PCI地址映射
+for iface in $(ls /sys/class/net/); do
+    if [ -e "/sys/class/net/$iface/device" ]; then
+        pci=$(basename $(readlink -f /sys/class/net/$iface/device))
+        echo "$iface -> $pci"
+    fi
+done
+
+# 查看网卡详细状态
+cat /proc/net/dev
 ```
 
 ## 性能基准测试
@@ -511,37 +637,88 @@ go func() {
 
 ### 常见问题
 
-1. **编译错误：找不到 DPDK**
+1. **编译错误：找不到 DPDK 头文件**
    ```bash
-   export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
-   export LD_LIBRARY_PATH=/usr/local/lib
+   # 设置正确的编译环境
+   export CGO_CFLAGS="$(pkg-config --cflags libdpdk)"
+   export CGO_LDFLAGS="$(pkg-config --libs libdpdk)"
+   
+   # 如果 pkg-config 找不到 libdpdk
+   export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+   export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
    ```
 
-2. **运行时错误：权限不足**
+2. **编译错误：链接器标志被拒绝**
    ```bash
-   # 设置 capabilities
+   # 允许链接器标志
+   CGO_LDFLAGS_ALLOW='-Wl,.*' go build
+   ```
+
+3. **运行时错误：权限不足**
+   ```bash
+   # 设置 capabilities (推荐)
    sudo setcap cap_net_raw,cap_net_admin+ep ./your-app
    
    # 或使用 root 权限
    sudo ./your-app
    ```
 
-3. **性能不佳：hugepages 不足**
+4. **找不到网卡PCI地址**
+   ```bash
+   # 查看所有网络接口和对应PCI地址
+   for iface in $(ip link show | grep -E "^[0-9]+:" | awk '{print $2}' | sed 's/://g'); do
+       if [ -e "/sys/class/net/$iface/device" ]; then
+           pci=$(basename $(readlink -f /sys/class/net/$iface/device))
+           echo "$iface -> $pci"
+       fi
+   done
+   ```
+
+5. **性能不佳：hugepages 不足**
    ```bash
    # 检查 hugepages 使用情况
    cat /proc/meminfo | grep -i huge
    
-   # 增加 hugepages
+   # 增加 hugepages (重启后失效)
    echo 2048 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+   
+   # 永久配置 hugepages
+   echo 'vm.nr_hugepages=2048' >> /etc/sysctl.conf
    ```
 
-4. **网络连接失败：网卡未绑定**
+6. **网卡绑定失败**
    ```bash
-   # 检查网卡绑定状态
-   dpdk-devbind.py --status
+   # 检查网卡是否正在使用
+   sudo netstat -i
+   sudo ifconfig eth0 down  # 先停用网卡
    
-   # 重新绑定网卡
-   dpdk-devbind.py --bind=vfio-pci <PCI-ADDRESS>
+   # 检查驱动是否加载
+   lsmod | grep uio_pci_generic
+   sudo modprobe uio_pci_generic
+   
+   # 重新绑定
+   sudo ./dpdk-devbind.py -b uio_pci_generic 0000:00:08.0
+   ```
+
+7. **找不到 dpdk-devbind.py 脚本**
+   ```bash
+   # 在不同位置查找脚本
+   find /usr -name "dpdk-devbind.py" 2>/dev/null
+   find /opt -name "dpdk-devbind.py" 2>/dev/null
+   
+   # 如果从源码编译，脚本在源码目录
+   find ./dpdk-19.11.14 -name "dpdk-devbind.py"
+   ```
+
+8. **Go 版本过低**
+   ```bash
+   # 检查 Go 版本
+   go version
+   
+   # 如果版本 < 1.19，需要升级
+   sudo rm -rf /usr/local/go
+   wget https://go.dev/dl/go1.19.13.linux-amd64.tar.gz
+   sudo tar -C /usr/local -xzf go1.19.13.linux-amd64.tar.gz
    ```
 
 ### 调试技巧
