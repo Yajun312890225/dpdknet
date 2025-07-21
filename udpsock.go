@@ -54,22 +54,6 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	}
 	log.Printf("[DEBUG] Created UDPConn with localAddr=%v, txPort=%d", laddr, dpdkPort)
 
-	// 创建独立的发送流
-	log.Printf("[DEBUG] Creating TX flow...")
-	txFlow := flow.SetGenerator(func(pkt *packet.Packet, ctx flow.UserContext) {
-		select {
-		case sendPkt := <-c.sendCh:
-			// 复制数据包内容到生成的数据包
-			*pkt = *sendPkt
-			log.Printf("[DEBUG] Generator: packet prepared for sending")
-		default:
-			// 没有数据包要发送，生成一个空包
-			packet.InitEmptyPacket(pkt, 0)
-		}
-	}, nil)
-	c.txFlow = txFlow
-	log.Printf("[DEBUG] TX flow created successfully")
-
 	flow.SetHandler(rxFlow, func(pkt *packet.Packet, ctx flow.UserContext) {
 		data := pkt.GetRawPacketBytes()
 		log.Printf("[DEBUG] Received packet, raw length=%d bytes", len(data))
@@ -156,14 +140,28 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 
 	log.Printf("[DEBUG] Handler set successfully")
 
-	// 为发送流设置发送器
-	log.Printf("[DEBUG] Setting TX sender to port %d", dpdkPort)
-	err = flow.SetSender(txFlow, dpdkPort)
-	if err != nil {
-		log.Printf("[ERROR] Failed to set TX sender: %v", err)
+	if err := flow.SetSender(rxFlow, dpdkPort); err != nil {
 		return nil, err
 	}
-	log.Printf("[DEBUG] TX sender set successfully")
+
+	// 创建独立的发送流
+	log.Printf("[DEBUG] Creating TX flow...")
+	txFlow := flow.SetGenerator(func(pkt *packet.Packet, ctx flow.UserContext) {
+		select {
+		case sendPkt := <-c.sendCh:
+			// 复制数据包内容到生成的数据包
+			*pkt = *sendPkt
+			log.Printf("[DEBUG] Generator: packet prepared for sending")
+		default:
+			// 没有数据包要发送，生成一个空包
+			packet.InitEmptyPacket(pkt, 0)
+		}
+	}, nil)
+	c.txFlow = txFlow
+	log.Printf("[DEBUG] TX flow created successfully")
+	if err := flow.SetSender(txFlow, dpdkPort); err != nil {
+		return nil, err
+	}
 
 	// 启动DPDK数据包处理系统
 	// 这必须在所有流和处理器设置完成后调用
