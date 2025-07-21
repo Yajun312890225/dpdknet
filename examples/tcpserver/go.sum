@@ -1,0 +1,4 @@
+github.com/Yajun312890225/nff-go v0.0.0-20250721065636-ec27cf0d3b42 h1:GwJqpfcOGuCrXQMcH+bZ1d0Pcf2ABs7Sy/oStv29Sso=
+github.com/Yajun312890225/nff-go v0.0.0-20250721065636-ec27cf0d3b42/go.mod h1:tMdTbeQ6BFYV7pdI2Ph85BzBxo9vCsa6hscy0QEtE/o=
+github.com/pkg/errors v0.8.1 h1:iURUrRGxPUNPdy5/HRSm+Yj6okJ6UtLINN0Q9M4+h3I=
+github.com/pkg/errors v0.8.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
