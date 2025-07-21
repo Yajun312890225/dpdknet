@@ -70,6 +70,15 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	c.txFlow = txFlow
 	log.Printf("[DEBUG] TX flow created successfully")
 
+	// 设置发送器 - 这是流的终止点
+	log.Printf("[DEBUG] Setting TX sender to port %d", dpdkPort)
+	err = flow.SetSender(txFlow, dpdkPort)
+	if err != nil {
+		log.Printf("[ERROR] Failed to set TX sender: %v", err)
+		return nil, err
+	}
+	log.Printf("[DEBUG] TX sender set successfully")
+
 	flow.SetHandler(rxFlow, func(pkt *packet.Packet, ctx flow.UserContext) {
 		data := pkt.GetRawPacketBytes()
 		log.Printf("[DEBUG] Received packet, raw length=%d bytes", len(data))
