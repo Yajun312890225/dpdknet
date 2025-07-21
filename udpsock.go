@@ -17,8 +17,10 @@ type UDPConn struct {
 	localAddr  *UDPAddr
 	remoteAddr *UDPAddr
 	rxFlow     *flow.Flow
+	txFlow     *flow.Flow
 	txPort     uint16
 	recvCh     chan []byte
+	sendCh     chan *packet.Packet
 	mu         sync.Mutex
 	closed     bool
 }
@@ -48,8 +50,37 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 		rxFlow:    rxFlow,
 		txPort:    dpdkPort, // 这里存储的是DPDK端口ID，不是UDP端口号
 		recvCh:    make(chan []byte, 4096),
+		sendCh:    make(chan *packet.Packet, 1024),
 	}
 	log.Printf("[DEBUG] Created UDPConn with localAddr=%v, txPort=%d", laddr, dpdkPort)
+
+	// 创建发送流
+	log.Printf("[DEBUG] Creating TX flow...")
+	txFlow := flow.SetGenerator(func(pkt *packet.Packet, ctx flow.UserContext) {
+		select {
+		case sendPkt := <-c.sendCh:
+			// 复制数据包内容
+			pkt.Ether = sendPkt.Ether
+			pkt.Data = sendPkt.Data
+			pkt.Next = sendPkt.Next
+			pkt.CMbuf = sendPkt.CMbuf
+			log.Printf("[DEBUG] Generator: packet prepared for sending")
+		default:
+			// 没有数据包要发送，生成一个空包
+			packet.InitEmptyPacket(pkt, 0)
+		}
+	}, nil)
+	log.Printf("[DEBUG] TX flow created successfully")
+	c.txFlow = txFlow
+
+	// 设置发送器
+	log.Printf("[DEBUG] Setting TX sender to port %d", dpdkPort)
+	err = flow.SetSender(txFlow, dpdkPort)
+	if err != nil {
+		log.Printf("[ERROR] Failed to set TX sender: %v", err)
+		return nil, err
+	}
+	log.Printf("[DEBUG] TX sender set successfully")
 
 	flow.SetHandler(rxFlow, func(pkt *packet.Packet, ctx flow.UserContext) {
 		data := pkt.GetRawPacketBytes()
@@ -136,6 +167,15 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	}, nil)
 
 	log.Printf("[DEBUG] Handler set successfully")
+
+	// 设置Stopper来关闭流 - 这是必需的，否则SystemStart会失败
+	log.Printf("[DEBUG] Setting flow stopper...")
+	err = flow.SetStopper(rxFlow)
+	if err != nil {
+		log.Printf("[ERROR] Failed to set flow stopper: %v", err)
+		return nil, err
+	}
+	log.Printf("[DEBUG] Flow stopper set successfully")
 
 	// 启动DPDK数据包处理系统
 	// 这必须在所有流和处理器设置完成后调用
@@ -280,12 +320,17 @@ func (c *UDPConn) WriteToUDP(buf []byte, addr *UDPAddr) (int, error) {
 	ipv4Hdr.HdrChecksum = packet.SwapBytesUint16(checksum)
 	log.Printf("[DEBUG] Calculated IP header checksum: 0x%04x", checksum)
 
-	// 发送数据包 - 这里使用简化的发送方式
-	// 实际应用中应该通过专门的发送流来发送
-	log.Printf("[INFO] Sending UDP packet to %s:%d (len=%d)", addr.IP.String(), addr.Port, len(buf))
-	log.Printf("[DEBUG] WriteToUDP completed successfully")
-
-	return len(buf), nil
+	// 通过发送通道发送数据包
+	log.Printf("[DEBUG] Sending packet through TX channel...")
+	select {
+	case c.sendCh <- pkt:
+		log.Printf("[INFO] UDP packet sent to %s:%d (len=%d)", addr.IP.String(), addr.Port, len(buf))
+		log.Printf("[DEBUG] WriteToUDP completed successfully")
+		return len(buf), nil
+	default:
+		log.Printf("[ERROR] Send channel full, dropping packet")
+		return 0, errors.New("send buffer full")
+	}
 }
 
 // Write writes data to the connection.
@@ -316,6 +361,7 @@ func (c *UDPConn) Close() error {
 	}
 	c.closed = true
 	close(c.recvCh)
+	close(c.sendCh)
 	log.Printf("[DEBUG] Connection closed successfully")
 	return nil
 }
