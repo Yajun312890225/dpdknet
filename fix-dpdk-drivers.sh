@@ -46,11 +46,7 @@ fi
 
 # 重新配置，显式启用所有网卡驱动
 echo "   配置meson构建..."
-meson build \
-    -Denable_drivers=net/vmxnet3,net/e1000,net/ixgbe,net/i40e,net/mlx4,net/mlx5,net/af_packet,net/bonding,net/failsafe,net/kni,net/null,net/pcap,net/ring,net/tap,net/vhost \
-    -Ddisable_drivers= \
-    -Dmax_numa_nodes=8 \
-    -Dmax_ethports=32
+meson build 
 
 cd build
 
