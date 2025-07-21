@@ -141,6 +141,7 @@ devbind_paths=(
     "/usr/local/bin/dpdk-devbind.py"
     "/usr/bin/dpdk-devbind.py"
     "./dpdk-devbind.py"
+    "/tmp/dpdk-stable-19.11.14/usertools/dpdk-devbind.py"
     "/opt/dpdk/usertools/dpdk-devbind.py"
 )
 

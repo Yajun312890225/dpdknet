@@ -43,8 +43,14 @@ cd dpdknet
 # 2. 检查环境 (可选)
 ./check-dpdk-env.sh
 
-# 3. 自动配置 DPDK 环境
+# 3. 选择配置方法:
+
+# 方法A: 完整自动配置 (推荐)
 sudo ./setup-dpdk.sh eth0  # 替换 eth0 为你的网卡名
+
+# 方法B: 分步配置 (如果下载有问题)
+sudo ./install-go.sh       # 先安装Go
+sudo ./setup-dpdk.sh eth0 --skip-go  # 再配置DPDK
 
 # 4. 加载环境变量
 source /tmp/dpdk-env.sh
@@ -52,6 +58,8 @@ source /tmp/dpdk-env.sh
 # 5. 编译项目
 CGO_LDFLAGS_ALLOW='-Wl,.*' go build
 ```
+
+> **💡 提示**：如果在 `2. 安装 Go 1.19...` 步骤卡住，请按 `Ctrl+C` 中断，然后使用方法B分步配置。
 
 ### 📝 简单示例
 
@@ -276,6 +284,7 @@ dpdknet/
 ├── README.md                    # 项目文档
 ├── go.mod                       # Go 模块文件
 ├── setup-dpdk.sh                # DPDK 自动配置脚本
+├── install-go.sh                # Go 专用安装脚本
 ├── check-dpdk-env.sh            # 环境检查脚本
 ├── *.go                         # 核心网络实现
 ├── *_test.go                    # 完整测试套件
@@ -291,6 +300,14 @@ dpdknet/
     ├── icmpserver/              # ICMP 服务器示例
     └── icmpclient/              # ICMP 客户端示例
 ```
+
+### 🛠️ 配置脚本说明
+
+| 脚本 | 用途 | 使用场景 |
+|------|------|----------|
+| `setup-dpdk.sh` | 完整DPDK环境配置 | 一键配置所有环境 |
+| `install-go.sh` | 专门安装Go环境 | 解决Go下载问题 |
+| `check-dpdk-env.sh` | 环境诊断检查 | 排查配置问题 |
 
 ## 功能特性详解
 
@@ -361,12 +378,41 @@ cd examples/icmpclient && go build && sudo ./icmpclient 8.8.8.8
 
 ### DPDK 环境配置
 
-> 💡 **快速配置**：我们提供了自动化配置脚本，可以一键完成环境配置：
+> 💡 **快速配置**：我们提供了多个自动化脚本：
 > ```bash
-> # 下载项目后运行配置脚本
+> # 方法1: 完整自动配置
 > sudo ./setup-dpdk.sh eth0  # 替换 eth0 为你的网卡名
 > source /tmp/dpdk-env.sh    # 加载环境变量
+> 
+> # 方法2: 单独安装Go (如果下载卡住)
+> sudo ./install-go.sh      # 专门的Go安装脚本
+> 
+> # 方法3: 跳过Go安装 (如果已手动安装Go)
+> sudo ./setup-dpdk.sh eth0 --skip-go
+> 
+> # 方法4: 检查环境配置
+> ./check-dpdk-env.sh       # 诊断配置问题
 > ```
+
+#### 常见下载问题解决
+
+如果脚本在下载Go时卡住：
+
+```bash
+# 方法1: 使用专门的Go安装脚本
+sudo ./install-go.sh
+
+# 方法2: 手动下载Go
+wget https://go.dev/dl/go1.19.13.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.19.13.linux-amd64.tar.gz
+export PATH=/usr/local/go/bin:$PATH
+
+# 方法3: 使用镜像源
+wget https://studygolang.com/dl/golang/go1.19.13.linux-amd64.tar.gz
+
+# 然后跳过Go安装运行DPDK配置
+sudo ./setup-dpdk.sh eth0 --skip-go
+```
 
 #### 手动配置步骤
 
@@ -392,7 +438,7 @@ go version
 # 下载并编译 DPDK 19.11.14 (稳定版本)
 sudo wget http://fast.dpdk.org/rel/dpdk-19.11.14.tar.xz
 sudo tar xf dpdk-19.11.14.tar.xz
-cd dpdk-19.11.14
+cd dpdk-stable-19.11.14
 
 # 使用 meson 构建系统
 sudo meson build
@@ -446,7 +492,7 @@ sudo modprobe uio_pci_generic
 # 首先找到dpdk-devbind.py的位置
 find /usr -name "dpdk-devbind.py" 2>/dev/null
 # 或者在构建目录中
-find ./dpdk-19.11.14 -name "dpdk-devbind.py"
+find ./dpdk-stable-19.11.14 -name "dpdk-devbind.py"
 
 # 绑定网卡 (示例PCI地址: 0000:00:08.0)
 sudo ./dpdk-devbind.py -b uio_pci_generic 0000:00:08.0
