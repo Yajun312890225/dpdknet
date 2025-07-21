@@ -45,6 +45,24 @@ cd /tmp
 # 清理旧文件
 rm -f go1.19.13.linux-amd64.tar.gz*
 
+# 检查是否已有下载好的文件
+if [ -f "go1.19.13.linux-amd64.tar.gz" ]; then
+    echo "发现已下载的Go安装包，检查文件完整性..."
+    file_size=$(stat -c%s "go1.19.13.linux-amd64.tar.gz" 2>/dev/null || echo 0)
+    echo "文件大小: ${file_size} bytes"
+    
+    if [ $file_size -gt 100000000 ] && file go1.19.13.linux-amd64.tar.gz | grep -q "gzip compressed"; then
+        echo "✅ 使用已下载的Go安装包"
+        download_success=true
+    else
+        echo "⚠️  已下载文件不完整或损坏，重新下载"
+        rm -f go1.19.13.linux-amd64.tar.gz
+    fi
+fi
+
+# 如果没有有效的已下载文件，开始下载
+if [ "$download_success" != true ]; then
+
 # 尝试多个下载方法
 download_success=false
 
@@ -196,6 +214,8 @@ if [ "$download_success" = false ]; then
     exit 1
 fi
 
+# 下载部分结束
+
 # 验证文件
 echo ""
 echo "验证下载文件..."
@@ -260,6 +280,15 @@ tar -C /usr/local -xzf go1.19.13.linux-amd64.tar.gz
 # 设置PATH
 if ! grep -q '/usr/local/go/bin' /etc/profile; then
     echo 'export PATH=/usr/local/go/bin:$PATH' >> /etc/profile
+fi
+
+# 也为当前用户设置PATH (如果是通过sudo运行的)
+if [ -n "$SUDO_USER" ]; then
+    user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    if [ -f "$user_home/.bashrc" ] && ! grep -q '/usr/local/go/bin' "$user_home/.bashrc"; then
+        echo 'export PATH=/usr/local/go/bin:$PATH' >> "$user_home/.bashrc"
+        echo "   已添加PATH到 $user_home/.bashrc"
+    fi
 fi
 
 export PATH=/usr/local/go/bin:$PATH

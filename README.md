@@ -418,13 +418,9 @@ cd examples/icmpclient && go build && sudo ./icmpclient 8.8.8.8
 sudo ./install-go.sh
 
 # 方法2: 网络问题诊断和专用下载
-./test-network.sh        # 先测试网络连接
 ./download-go-manual.sh  # 使用多镜像源下载
-sudo ./install-go.sh     # 安装已下载的Go
+sudo ./install-go.sh     # 安装 (会自动检测已下载文件)
 
-# 方法3: SSL证书问题修复
-sudo ./fix-ssl-certs.sh  # 修复SSL证书问题
-sudo ./install-go.sh     # 重新尝试安装
 
 # 方法4: 手动下载Go
 wget https://go.dev/dl/go1.19.13.linux-amd64.tar.gz
