@@ -26,12 +26,10 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 		return nil, err
 	}
 
-	port := uint16(0)
-	if laddr != nil {
-		port = uint16(laddr.Port)
-	}
+	// DPDK使用物理端口ID，通常从0开始，而不是UDP端口号
+	dpdkPort := uint16(0) // 默认使用第一个DPDK端口
 
-	rxFlow, err := flow.SetReceiver(port)
+	rxFlow, err := flow.SetReceiver(dpdkPort)
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +37,7 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	c := &UDPConn{
 		localAddr: laddr,
 		rxFlow:    rxFlow,
-		txPort:    port,
+		txPort:    dpdkPort, // 这里存储的是DPDK端口ID，不是UDP端口号
 		recvCh:    make(chan []byte, 4096),
 	}
 
