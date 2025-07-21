@@ -71,24 +71,70 @@ find "$dpdk_lib_path" -name "librte_net_*.a" 2>/dev/null | sort | while read lib
 done
 
 # 特别检查VMXNet3驱动
+vmxnet3_lib_found=false
 if [ -f "$dpdk_lib_path/librte_net_vmxnet3.a" ]; then
     echo "   ✅ VMXNet3驱动已安装: librte_net_vmxnet3.a"
+    vmxnet3_lib_found=true
 else
     echo "   ❌ VMXNet3驱动仍然缺失"
     echo "      这可能是因为您的系统不支持该驱动或编译时出现问题"
 fi
 
+# 检查并创建 librte_pmd_vmxnet3_uio.a (用于兼容旧版本链接器需求)
+echo "5. 处理 VMXNet3 UIO 驱动兼容性..."
+if [ "$vmxnet3_lib_found" = true ]; then
+    # 如果存在 librte_net_vmxnet3.a，创建 librte_pmd_vmxnet3_uio.a 的符号链接或拷贝
+    if [ ! -f "/usr/local/lib/librte_pmd_vmxnet3_uio.a" ]; then
+        echo "   创建 VMXNet3 UIO 驱动文件..."
+        cp "$dpdk_lib_path/librte_net_vmxnet3.a" "/usr/local/lib/librte_pmd_vmxnet3_uio.a"
+        echo "   ✅ 已拷贝: librte_net_vmxnet3.a -> /usr/local/lib/librte_pmd_vmxnet3_uio.a"
+    else
+        echo "   ✅ librte_pmd_vmxnet3_uio.a 已存在"
+    fi
+else
+    # 尝试从构建目录查找
+    echo "   尝试从构建目录查找 VMXNet3 驱动..."
+    for search_path in "$DPDK_SRC_DIR/build/drivers/net/vmxnet3" "$DPDK_SRC_DIR/build/lib" "$DPDK_SRC_DIR/build"; do
+        vmxnet3_files=$(find "$search_path" -name "*vmxnet3*" -type f 2>/dev/null || true)
+        if [ -n "$vmxnet3_files" ]; then
+            echo "   找到VMXNet3相关文件:"
+            echo "$vmxnet3_files" | while read file; do
+                echo "     - $file"
+                # 如果是库文件，拷贝到 /usr/local/lib/
+                if [[ "$file" == *.a || "$file" == *.so* ]]; then
+                    cp "$file" "/usr/local/lib/librte_pmd_vmxnet3_uio.a"
+                    echo "   ✅ 已拷贝: $(basename $file) -> /usr/local/lib/librte_pmd_vmxnet3_uio.a"
+                    break
+                fi
+            done
+            break
+        fi
+    done
+fi
+
+# 确保 /usr/local/lib 在库搜索路径中
+if [ ! -f "/usr/local/lib/librte_pmd_vmxnet3_uio.a" ]; then
+    echo "   ⚠️  仍然无法找到或创建 librte_pmd_vmxnet3_uio.a"
+    echo "      可能需要手动编译或您的系统不支持VMXNet3"
+fi
+
 # 检查UIO相关库 (注意: 新版本DPDK中UIO库命名可能不同)
-echo "   检查UIO相关库:"
+echo "6. 检查UIO相关库:"
 find "$dpdk_lib_path" -name "*uio*" 2>/dev/null | while read lib; do
     echo "     ✅ $(basename $lib)"
-done || echo "     ℹ️  未找到UIO相关库文件"
+done
+find "/usr/local/lib" -name "*uio*" 2>/dev/null | while read lib; do
+    echo "     ✅ $(basename $lib) (在 /usr/local/lib)"
+done
+if [ ! -f "$dpdk_lib_path/librte_pmd_vmxnet3_uio.a" ] && [ ! -f "/usr/local/lib/librte_pmd_vmxnet3_uio.a" ]; then
+    echo "     ℹ️  未找到UIO相关库文件"
+fi
 
-echo "5. 更新环境变量..."
+echo "7. 更新环境变量..."
 cat > /tmp/dpdk-env.sh << 'EOF'
 # DPDK 环境变量
 export CGO_CFLAGS="$(pkg-config --cflags libdpdk)"
-export CGO_LDFLAGS="$(pkg-config --libs libdpdk)"
+export CGO_LDFLAGS="$(pkg-config --libs libdpdk) -L/usr/local/lib"
 export PATH=/usr/local/go/bin:$PATH
 EOF
 
@@ -105,3 +151,4 @@ echo "如果仍有问题，请检查:"
 echo "- 系统是否支持VMXNet3网卡"
 echo "- 是否在VMware虚拟机中运行"
 echo "- 编译日志是否有错误信息"
+echo "- /usr/local/lib/librte_pmd_vmxnet3_uio.a 是否存在"

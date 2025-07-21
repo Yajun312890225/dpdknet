@@ -230,7 +230,7 @@ cd dpdk-stable-19.11.14
 echo "   正在配置 DPDK 构建..."
 if [ ! -d "build" ]; then
     # 配置 meson 构建，确保启用所有网卡驱动
-    meson build -Denable_drivers=net/vmxnet3,net/e1000,net/ixgbe,net/i40e,net/mlx4,net/mlx5
+    meson build 
 fi
 cd build
 
