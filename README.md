@@ -48,7 +48,10 @@ cd dpdknet
 # 方法A: 完整自动配置 (推荐)
 sudo ./setup-dpdk.sh eth0  # 替换 eth0 为你的网卡名
 
-# 方法B: 分步配置 (如果下载有问题)
+# 方法B: 仅编译环境 (开发/测试用)
+sudo ./setup-dpdk.sh --compile-only  # 只安装编译依赖，不绑定网卡
+
+# 方法C: 分步配置 (如果下载有问题)
 sudo ./install-go.sh       # 先安装Go
 sudo ./setup-dpdk.sh eth0 --skip-go  # 再配置DPDK
 
@@ -306,8 +309,10 @@ dpdknet/
 | 脚本 | 用途 | 使用场景 |
 |------|------|----------|
 | `setup-dpdk.sh` | 完整DPDK环境配置 | 一键配置所有环境 |
+| `setup-dpdk.sh --compile-only` | 仅编译环境配置 | 开发/测试阶段，无需绑定网卡 |
 | `install-go.sh` | 专门安装Go环境 | 解决Go下载问题 |
 | `check-dpdk-env.sh` | 环境诊断检查 | 排查配置问题 |
+| `fix-dpdk-drivers.sh` | 驱动库修复 | 解决网卡驱动缺失问题 |
 
 ## 功能特性详解
 
@@ -384,13 +389,17 @@ cd examples/icmpclient && go build && sudo ./icmpclient 8.8.8.8
 > sudo ./setup-dpdk.sh eth0  # 替换 eth0 为你的网卡名
 > source /tmp/dpdk-env.sh    # 加载环境变量
 > 
-> # 方法2: 单独安装Go (如果下载卡住)
+> # 方法2: 仅编译环境 (开发/测试推荐)
+> sudo ./setup-dpdk.sh --compile-only  # 只配置编译环境，不绑定网卡
+> source /tmp/dpdk-env.sh              # 加载环境变量
+> 
+> # 方法3: 单独安装Go (如果下载卡住)
 > sudo ./install-go.sh      # 专门的Go安装脚本
 > 
-> # 方法3: 跳过Go安装 (如果已手动安装Go)
+> # 方法4: 跳过Go安装 (如果已手动安装Go)
 > sudo ./setup-dpdk.sh eth0 --skip-go
 > 
-> # 方法4: 检查环境配置
+> # 方法5: 检查环境配置
 > ./check-dpdk-env.sh       # 诊断配置问题
 > ```
 
@@ -719,6 +728,26 @@ go func() {
        fi
    done
    ```
+
+5. **DPDK驱动库文件缺失**
+   ```bash
+   # 问题：编译或运行时提示 librte_pmd_vmxnet3_uio.a 或其他驱动库缺失
+   # 这通常发生在VMware虚拟机或特定网卡环境中
+   
+   # 解决方案1: 使用驱动修复脚本
+   sudo ./fix-dpdk-drivers.sh
+   
+   # 解决方案2: 手动重新编译DPDK并启用所有驱动
+   cd /tmp/dpdk-stable-19.11.14
+   rm -rf build
+   meson build -Denable_drivers=net/vmxnet3,net/e1000,net/ixgbe,net/i40e,net/mlx4,net/mlx5
+   cd build && ninja && sudo ninja install
+   
+   # 验证驱动库文件
+   find /usr/local/lib* -name "librte_net_*.a" | sort
+   ```
+
+6. **Hugepages配置问题**
 
 5. **性能不佳：hugepages 不足**
    ```bash

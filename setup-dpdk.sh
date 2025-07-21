@@ -2,8 +2,12 @@
 
 # DPDK 环境配置脚本
 # 使用方法: sudo ./setup-dpdk.sh [网卡名称] [选项]
-# 示例: sudo ./setup-dpdk.sh eth0
-# 选项: --skip-go  跳过Go安装
+# 示例: 
+#   sudo ./setup-dpdk.sh eth0           # 完整安装并绑定网卡
+#   sudo ./setup-dpdk.sh --compile-only # 仅安装编译环境
+# 选项: 
+#   --skip-go      跳过Go安装
+#   --compile-only 仅安装编译环境，跳过网卡绑定
 
 set -e
 
@@ -14,11 +18,15 @@ echo "=========================================="
 # 解析命令行参数
 INTERFACE=""
 SKIP_GO=false
+COMPILE_ONLY=false
 
 for arg in "$@"; do
     case $arg in
         --skip-go)
             SKIP_GO=true
+            ;;
+        --compile-only)
+            COMPILE_ONLY=true
             ;;
         --help|-h)
             echo "用法: sudo $0 [网卡名称] [选项]"
@@ -27,13 +35,15 @@ for arg in "$@"; do
             echo "  网卡名称     要绑定到DPDK的网卡 (如: eth0)"
             echo ""
             echo "选项:"
-            echo "  --skip-go    跳过Go环境安装"
-            echo "  --help, -h   显示此帮助信息"
+            echo "  --skip-go      跳过Go环境安装"
+            echo "  --compile-only 仅安装编译环境，跳过网卡绑定和hugepages配置"
+            echo "  --help, -h     显示此帮助信息"
             echo ""
             echo "示例:"
-            echo "  sudo $0 eth0           # 完整安装并绑定eth0"
-            echo "  sudo $0 --skip-go     # 只安装DPDK,跳过Go"
-            echo "  sudo $0 eth0 --skip-go # 跳过Go,绑定eth0"
+            echo "  sudo $0 eth0              # 完整安装并绑定eth0"
+            echo "  sudo $0 --skip-go        # 只安装DPDK,跳过Go"
+            echo "  sudo $0 --compile-only   # 仅安装编译环境"
+            echo "  sudo $0 eth0 --skip-go   # 跳过Go,绑定eth0"
             exit 0
             ;;
         -*)
@@ -42,12 +52,20 @@ for arg in "$@"; do
             exit 1
             ;;
         *)
-            if [ -z "$INTERFACE" ]; then
+            if [ -z "$INTERFACE" ] && [ "$COMPILE_ONLY" = false ]; then
                 INTERFACE="$arg"
+            elif [ "$COMPILE_ONLY" = false ]; then
+                echo "错误: 只能指定一个网卡名称"
+                exit 1
             fi
             ;;
     esac
 done
+
+# 如果启用了 compile-only 模式，清空接口参数
+if [ "$COMPILE_ONLY" = true ]; then
+    INTERFACE=""
+fi
 
 # 检查是否为root权限
 if [[ $EUID -ne 0 ]]; then
@@ -211,7 +229,8 @@ cd dpdk-stable-19.11.14
 
 echo "   正在配置 DPDK 构建..."
 if [ ! -d "build" ]; then
-    meson build
+    # 配置 meson 构建，确保启用所有网卡驱动
+    meson build -Denable_drivers=net/vmxnet3,net/e1000,net/ixgbe,net/i40e,net/mlx4,net/mlx5
 fi
 cd build
 
@@ -225,42 +244,78 @@ echo "4. 验证DPDK安装..."
 if pkg-config --exists libdpdk; then
     echo "✅ DPDK 安装成功"
     echo "   版本: $(pkg-config --modversion libdpdk)"
+    
+    # 检查关键驱动库文件
+    echo "   检查驱动库文件..."
+    dpdk_lib_path=$(pkg-config --variable=libdir libdpdk 2>/dev/null || echo "/usr/local/lib/x86_64-linux-gnu")
+    
+    # 检查常用网卡驱动库
+    missing_libs=()
+    for lib in "librte_net_vmxnet3.a" "librte_net_e1000.a" "librte_net_ixgbe.a"; do
+        if [ ! -f "$dpdk_lib_path/$lib" ] && [ ! -f "/usr/local/lib/$lib" ] && [ ! -f "/usr/lib/x86_64-linux-gnu/$lib" ]; then
+            missing_libs+=("$lib")
+        fi
+    done
+    
+    if [ ${#missing_libs[@]} -eq 0 ]; then
+        echo "   ✅ 所有驱动库文件已安装"
+    else
+        echo "   ⚠️  以下驱动库文件缺失:"
+        for lib in "${missing_libs[@]}"; do
+            echo "     - $lib"
+        done
+        echo "   这可能影响特定网卡的使用，但核心功能仍然可用"
+    fi
 else
     echo "❌ DPDK 安装失败"
     exit 1
 fi
 
 # 5. 配置hugepages
-echo "5. 配置 Hugepages..."
-# 配置2MB hugepages (1GB)
-echo 1024 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
+if [ "$COMPILE_ONLY" = true ]; then
+    echo "5. 跳过 Hugepages 配置 (--compile-only 模式)"
+    echo "   编译模式下不需要配置hugepages"
+    echo "   如需运行程序，请稍后手动配置或重新运行脚本"
+else
+    echo "5. 配置 Hugepages..."
+    # 配置2MB hugepages (1GB)
+    echo 1024 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
 
-# 创建挂载点并挂载
-mkdir -p /mnt/huge
-if ! mountpoint -q /mnt/huge; then
-    mount -t hugetlbfs nodev /mnt/huge
+    # 创建挂载点并挂载
+    mkdir -p /mnt/huge
+    if ! mountpoint -q /mnt/huge; then
+        mount -t hugetlbfs nodev /mnt/huge
+    fi
+
+    echo "   Hugepages 配置:"
+    cat /proc/meminfo | grep -i huge
 fi
 
-echo "   Hugepages 配置:"
-cat /proc/meminfo | grep -i huge
-
 # 6. 查找网卡PCI地址
-echo "6. 查找网络接口..."
-echo "   可用网络接口:"
-ip link show | grep -E "^[0-9]+:" | awk '{print $2}' | sed 's/://g'
+if [ "$COMPILE_ONLY" = true ]; then
+    echo "6. 跳过网卡检测 (--compile-only 模式)"
+    echo "   编译模式下不检测网卡信息"
+else
+    echo "6. 查找网络接口..."
+    echo "   可用网络接口:"
+    ip link show | grep -E "^[0-9]+:" | awk '{print $2}' | sed 's/://g'
 
-echo ""
-echo "   网卡PCI地址信息:"
-for iface in $(ip link show | grep -E "^[0-9]+:" | awk '{print $2}' | sed 's/://g'); do
-    if [ -e "/sys/class/net/$iface/device" ]; then
-        pci_addr=$(basename $(readlink -f /sys/class/net/$iface/device))
-        driver=$(basename $(readlink -f /sys/class/net/$iface/device/driver) 2>/dev/null || echo "未知")
-        echo "   $iface -> $pci_addr (driver: $driver)"
-    fi
-done
+    echo ""
+    echo "   网卡PCI地址信息:"
+    for iface in $(ip link show | grep -E "^[0-9]+:" | awk '{print $2}' | sed 's/://g'); do
+        if [ -e "/sys/class/net/$iface/device" ]; then
+            pci_addr=$(basename $(readlink -f /sys/class/net/$iface/device))
+            driver=$(basename $(readlink -f /sys/class/net/$iface/device/driver) 2>/dev/null || echo "未知")
+            echo "   $iface -> $pci_addr (driver: $driver)"
+        fi
+    done
+fi
 
 # 7. 绑定网卡 (如果指定了网卡名称)
-if [ ! -z "$INTERFACE" ]; then
+if [ "$COMPILE_ONLY" = true ]; then
+    echo "7. 跳过网卡绑定 (--compile-only 模式)"
+    echo "   编译模式下不绑定网卡到DPDK"
+elif [ ! -z "$INTERFACE" ]; then
     echo "7. 绑定网卡 $INTERFACE 到DPDK..."
     
     # 获取PCI地址
@@ -345,17 +400,43 @@ echo "   source /tmp/dpdk-env.sh"
 # 9. 完成
 echo ""
 echo "=========================================="
-echo "         DPDK 环境配置完成!"
+if [ "$COMPILE_ONLY" = true ]; then
+    echo "       DPDK 编译环境配置完成!"
+else
+    echo "         DPDK 环境配置完成!"
+fi
 echo "=========================================="
 echo ""
-echo "下一步操作:"
-echo "1. 加载环境变量: source /tmp/dpdk-env.sh"
-echo "2. 编译项目: CGO_LDFLAGS_ALLOW='-Wl,.*' go build"
-if [ -z "$INTERFACE" ]; then
-    echo "3. 绑定网卡: sudo $0 <网卡名称>"
+
+if [ "$COMPILE_ONLY" = true ]; then
+    echo "编译环境已就绪:"
+    echo "1. 加载环境变量: source /tmp/dpdk-env.sh"
+    echo "2. 编译项目: CGO_LDFLAGS_ALLOW='-Wl,.*' go build"
+    echo ""
+    echo "注意事项:"
+    echo "- 当前为编译模式，未配置hugepages和网卡绑定"
+    echo "- 如需运行程序，请使用完整安装模式:"
+    echo "  sudo $0 <网卡名称>  # 完整安装"
+    echo ""
+    echo "或手动配置运行环境:"
+    echo "- 配置hugepages: echo 1024 | sudo tee /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages"
+    echo "- 绑定网卡: sudo $0 <网卡名称>"
+else
+    echo "下一步操作:"
+    echo "1. 加载环境变量: source /tmp/dpdk-env.sh"
+    echo "2. 编译项目: CGO_LDFLAGS_ALLOW='-Wl,.*' go build"
+    if [ -z "$INTERFACE" ]; then
+        echo "3. 绑定网卡: sudo $0 <网卡名称>"
+    fi
+    echo ""
+    echo "如遇问题可尝试:"
+    echo "- 驱动库缺失: sudo ./fix-dpdk-drivers.sh"
+    echo "- 环境检查: ./check-dpdk-env.sh"
+    echo ""
+    echo "验证命令:"
+    echo "- 检查hugepages: cat /proc/meminfo | grep -i huge"
+    echo "- 检查DPDK: pkg-config --modversion libdpdk"
+    if [ ! -z "$INTERFACE" ]; then
+        echo "- 检查网卡绑定: python3 $DEVBIND_SCRIPT --status"
+    fi
 fi
-echo ""
-echo "验证命令:"
-echo "- 检查hugepages: cat /proc/meminfo | grep -i huge"
-echo "- 检查DPDK: pkg-config --modversion libdpdk"
-echo "- 检查网卡绑定: python3 $DEVBIND_SCRIPT --status"

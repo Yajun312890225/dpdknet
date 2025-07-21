@@ -63,6 +63,36 @@ if pkg-config --exists libdpdk; then
     echo "   版本: $(pkg-config --modversion libdpdk)"
     echo "   CFLAGS: $(pkg-config --cflags libdpdk | head -c 50)..."
     echo "   LDFLAGS: $(pkg-config --libs libdpdk | head -c 50)..."
+    
+    # 检查关键驱动库文件
+    echo ""
+    echo "   检查驱动库文件..."
+    dpdk_lib_path=$(pkg-config --variable=libdir libdpdk 2>/dev/null || echo "/usr/local/lib/x86_64-linux-gnu")
+    
+    # 检查常用网卡驱动库
+    critical_libs=("librte_net_vmxnet3.a" "librte_net_e1000.a" "librte_net_ixgbe.a")
+    missing_libs=()
+    
+    for lib in "${critical_libs[@]}"; do
+        found=false
+        for path in "$dpdk_lib_path" "/usr/local/lib" "/usr/lib/x86_64-linux-gnu"; do
+            if [ -f "$path/$lib" ]; then
+                echo -e "   ${GREEN}✅${NC} $lib"
+                found=true
+                break
+            fi
+        done
+        if [ "$found" = false ]; then
+            echo -e "   ${YELLOW}⚠️${NC} $lib (缺失)"
+            missing_libs+=("$lib")
+        fi
+    done
+    
+    if [ ${#missing_libs[@]} -gt 0 ]; then
+        echo ""
+        echo -e "   ${YELLOW}⚠️${NC} 部分驱动库缺失，可能影响特定网卡使用"
+        echo "   解决方案: sudo ./fix-dpdk-drivers.sh"
+    fi
 else
     echo -e "${RED}❌${NC} DPDK: 未安装或pkg-config配置错误"
 fi
@@ -173,7 +203,8 @@ echo "=========================================="
 echo ""
 echo "建议执行的命令:"
 if ! pkg-config --exists libdpdk; then
-    echo "- 安装DPDK: sudo ./setup-dpdk.sh"
+    echo "- 完整安装: sudo ./setup-dpdk.sh <网卡名>"
+    echo "- 仅编译环境: sudo ./setup-dpdk.sh --compile-only"
 fi
 
 if [ -z "$CGO_CFLAGS" ] || [ -z "$CGO_LDFLAGS" ]; then
@@ -185,3 +216,7 @@ if [ "$hugepages_2m" -eq 0 ]; then
 fi
 
 echo "- 编译项目: CGO_LDFLAGS_ALLOW='-Wl,.*' go build"
+echo ""
+echo "💡 开发提示:"
+echo "  如果只需要编译代码而不运行，可使用 --compile-only 选项"
+echo "  sudo ./setup-dpdk.sh --compile-only
