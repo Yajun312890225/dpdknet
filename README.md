@@ -313,10 +313,9 @@ dpdknet/
 |------|------|----------|
 | `setup-dpdk.sh` | 完整DPDK环境配置 | 一键配置所有环境 |
 | `setup-dpdk.sh --compile-only` | 仅编译环境配置 | 开发/测试阶段，无需绑定网卡 |
+| `setup-dpdk.sh --skip-go` | 跳过Go安装 | 已手动安装Go时使用 |
 | `install-go.sh` | 专门安装Go环境 | 解决Go下载问题 |
 | `download-go-manual.sh` | Go安装包手动下载 | 网络受限环境下载Go |
-| `test-network.sh` | 网络连接测试 | 诊断网络和下载问题 |
-| `fix-ssl-certs.sh` | SSL证书问题修复 | 解决下载时的SSL验证错误 |
 | `check-dpdk-env.sh` | 环境诊断检查 | 排查配置问题 |
 | `fix-dpdk-drivers.sh` | 驱动库修复 | 解决网卡驱动缺失问题 |
 
