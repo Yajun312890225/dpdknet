@@ -70,15 +70,6 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	c.txFlow = txFlow
 	log.Printf("[DEBUG] TX flow created successfully")
 
-	// 设置发送器 - 这是流的终止点
-	log.Printf("[DEBUG] Setting TX sender to port %d", dpdkPort)
-	err = flow.SetSender(txFlow, dpdkPort)
-	if err != nil {
-		log.Printf("[ERROR] Failed to set TX sender: %v", err)
-		return nil, err
-	}
-	log.Printf("[DEBUG] TX sender set successfully")
-
 	flow.SetHandler(rxFlow, func(pkt *packet.Packet, ctx flow.UserContext) {
 		data := pkt.GetRawPacketBytes()
 		log.Printf("[DEBUG] Received packet, raw length=%d bytes", len(data))
@@ -164,6 +155,15 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	}, nil)
 
 	log.Printf("[DEBUG] Handler set successfully")
+
+	// 设置发送器来关闭接收流 - 根据你提供的正确流程
+	log.Printf("[DEBUG] Setting RX sender to port %d", dpdkPort)
+	err = flow.SetSender(rxFlow, dpdkPort)
+	if err != nil {
+		log.Printf("[ERROR] Failed to set RX sender: %v", err)
+		return nil, err
+	}
+	log.Printf("[DEBUG] RX sender set successfully")
 
 	// 启动DPDK数据包处理系统
 	// 这必须在所有流和处理器设置完成后调用
