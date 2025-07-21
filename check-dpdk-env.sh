@@ -219,4 +219,4 @@ echo "- 编译项目: CGO_LDFLAGS_ALLOW='-Wl,.*' go build"
 echo ""
 echo "💡 开发提示:"
 echo "  如果只需要编译代码而不运行，可使用 --compile-only 选项"
-echo "  sudo ./setup-dpdk.sh --compile-only
+echo "  sudo ./setup-dpdk.sh --compile-only"
