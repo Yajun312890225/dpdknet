@@ -67,23 +67,29 @@ func (c *UDPConn) ReadFromUDP(buf []byte) (int, *UDPAddr, error) {
 	}
 
 	log.Printf("[DEBUG] Waiting for packet from receive channel...")
-	data := <-c.recvCh
-	log.Printf("[DEBUG] Received packet from channel, raw length=%d", len(data))
+	select {
+	case data, ok := <-c.recvCh:
+		if !ok {
+			log.Printf("[DEBUG] Receive channel closed")
+			return 0, nil, errors.New("connection closed")
+		}
+		log.Printf("[DEBUG] Received packet from channel, raw length=%d", len(data))
 
-	ipStart := 14
-	srcIP := net.IPv4(data[ipStart+12], data[ipStart+13], data[ipStart+14], data[ipStart+15])
-	udpStart := ipStart + int((data[ipStart]&0x0F)*4)
-	srcPort := int(binary.BigEndian.Uint16(data[udpStart : udpStart+2]))
+		ipStart := 14
+		srcIP := net.IPv4(data[ipStart+12], data[ipStart+13], data[ipStart+14], data[ipStart+15])
+		udpStart := ipStart + int((data[ipStart]&0x0F)*4)
+		srcPort := int(binary.BigEndian.Uint16(data[udpStart : udpStart+2]))
 
-	payloadStart := udpStart + 8
-	payloadLen := len(data) - payloadStart
-	log.Printf("[DEBUG] Extracting payload: start=%d, length=%d", payloadStart, payloadLen)
+		payloadStart := udpStart + 8
+		payloadLen := len(data) - payloadStart
+		log.Printf("[DEBUG] Extracting payload: start=%d, length=%d", payloadStart, payloadLen)
 
-	n := copy(buf, data[payloadStart:])
-	addr := &UDPAddr{IP: srcIP, Port: srcPort}
+		n := copy(buf, data[payloadStart:])
+		addr := &UDPAddr{IP: srcIP, Port: srcPort}
 
-	log.Printf("[DEBUG] ReadFromUDP returning: n=%d, addr=%s:%d", n, addr.IP.String(), addr.Port)
-	return n, addr, nil
+		log.Printf("[DEBUG] ReadFromUDP returning: n=%d, addr=%s:%d", n, addr.IP.String(), addr.Port)
+		return n, addr, nil
+	}
 }
 
 // ReadFrom reads a packet from the connection, copying the payload into buf.
