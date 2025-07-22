@@ -19,7 +19,8 @@ type UDPConn struct {
 	recvCh       chan []byte
 	mu           sync.Mutex
 	closed       bool
-	listenerKeys []string // 存储所有注册的监听器key
+	listenerKeys []string            // 存储所有注册的监听器key
+	clientMACs   map[string][6]uint8 // 存储客户端IP对应的MAC地址
 }
 
 func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
@@ -34,8 +35,9 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	log.Printf("[DEBUG] Global network init completed successfully")
 
 	c := &UDPConn{
-		localAddr: laddr,
-		recvCh:    make(chan []byte, 4096),
+		localAddr:  laddr,
+		recvCh:     make(chan []byte, 4096),
+		clientMACs: make(map[string][6]uint8),
 	}
 	log.Printf("[DEBUG] Created UDPConn with localAddr=%v", laddr)
 
@@ -91,10 +93,24 @@ func (c *UDPConn) ReadFromUDP(buf []byte) (int, *UDPAddr, error) {
 		}
 		log.Printf("[DEBUG] Received packet from channel, raw length=%d", len(data))
 
+		// 提取源MAC地址
+		srcMAC := [6]uint8{}
+		copy(srcMAC[:], data[6:12])
+		log.Printf("[DEBUG] Source MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+			srcMAC[0], srcMAC[1], srcMAC[2], srcMAC[3], srcMAC[4], srcMAC[5])
+
 		ipStart := 14
 		srcIP := net.IPv4(data[ipStart+12], data[ipStart+13], data[ipStart+14], data[ipStart+15])
 		udpStart := ipStart + int((data[ipStart]&0x0F)*4)
 		srcPort := int(binary.BigEndian.Uint16(data[udpStart : udpStart+2]))
+
+		// 保存客户端MAC地址
+		clientKey := srcIP.String()
+		c.mu.Lock()
+		c.clientMACs[clientKey] = srcMAC
+		c.mu.Unlock()
+		log.Printf("[DEBUG] Saved client MAC for %s: %02x:%02x:%02x:%02x:%02x:%02x",
+			clientKey, srcMAC[0], srcMAC[1], srcMAC[2], srcMAC[3], srcMAC[4], srcMAC[5])
 
 		payloadStart := udpStart + 8
 		payloadLen := len(data) - payloadStart
@@ -144,9 +160,20 @@ func (c *UDPConn) WriteToUDP(buf []byte, addr *UDPAddr) (int, error) {
 		return 0, errors.New("invalid destination address")
 	}
 
-	// 我们需要从最近接收到的包中获取正确的MAC地址
-	// 为简化起见，先使用广播地址，让交换机/路由器处理
-	return c.writeUDPWithMAC(buf, addr, [6]uint8{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	// 查找客户端的MAC地址
+	clientKey := addr.IP.String()
+	c.mu.Lock()
+	clientMAC, hasMAC := c.clientMACs[clientKey]
+	c.mu.Unlock()
+
+	if hasMAC {
+		log.Printf("[DEBUG] Found client MAC for %s: %02x:%02x:%02x:%02x:%02x:%02x",
+			clientKey, clientMAC[0], clientMAC[1], clientMAC[2], clientMAC[3], clientMAC[4], clientMAC[5])
+		return c.writeUDPWithMAC(buf, addr, clientMAC)
+	} else {
+		log.Printf("[DEBUG] No MAC found for client %s, using broadcast", clientKey)
+		return c.writeUDPWithMAC(buf, addr, [6]uint8{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	}
 }
 
 // writeUDPWithMAC 使用指定的目标MAC地址写入UDP包
@@ -176,10 +203,11 @@ func (c *UDPConn) writeUDPWithMAC(buf []byte, addr *UDPAddr, dstMAC [6]uint8) (i
 	udpHdr := pkt.GetUDPNoCheck()
 	log.Printf("[DEBUG] Got header pointers: eth=%p, ipv4=%p, udp=%p", ethHdr, ipv4Hdr, udpHdr)
 
-	// 设置以太网头 - 使用广播地址确保包能到达目标
-	ethHdr.DAddr = [6]uint8{0xff, 0xff, 0xff, 0xff, 0xff, 0xff} // 广播MAC地址
-	ethHdr.SAddr = [6]uint8{0x52, 0x54, 0x00, 0x12, 0x34, 0x56} // 使用常见的虚拟机MAC前缀
-	log.Printf("[DEBUG] Set Ethernet header: dst_mac=ff:ff:ff:ff:ff:ff (broadcast), src_mac=52:54:00:12:34:56")
+	// 设置以太网头 - 使用正确的MAC地址
+	ethHdr.DAddr = dstMAC                                       // 目标MAC（客户端）
+	ethHdr.SAddr = [6]uint8{0x52, 0x54, 0x00, 0x1c, 0x9c, 0xb6} // 服务器的真实MAC地址
+	log.Printf("[DEBUG] Set Ethernet header: dst_mac=%02x:%02x:%02x:%02x:%02x:%02x, src_mac=52:54:00:1c:9c:b6",
+		dstMAC[0], dstMAC[1], dstMAC[2], dstMAC[3], dstMAC[4], dstMAC[5])
 
 	// 设置源IP地址
 	if c.localAddr != nil && c.localAddr.IP != nil {
