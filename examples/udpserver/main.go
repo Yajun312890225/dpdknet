@@ -16,13 +16,13 @@ func main() {
 	log.Printf("[INFO] Starting UDP Server example...")
 
 	// 检查参数
-	port := "9090"
+	port := "8000"
 	if len(os.Args) > 1 {
 		port = os.Args[1]
 	}
 
 	// 解析监听地址
-	addr, err := dpdknet.ResolveUDPAddr("udp", "0.0.0.0:"+port)
+	addr, err := dpdknet.ResolveUDPAddr("udp", "192.168.66.53:"+port)
 	if err != nil {
 		log.Fatalf("[ERROR] Failed to resolve address: %v", err)
 	}
@@ -45,7 +45,7 @@ func main() {
 	// 服务器主循环
 	go func() {
 		buffer := make([]byte, 4096)
-		
+
 		for {
 			// 读取UDP数据包
 			n, clientAddr, err := conn.ReadFromUDP(buffer)
@@ -59,7 +59,7 @@ func main() {
 			}
 
 			data := buffer[:n]
-			log.Printf("[INFO] Received %d bytes from %s: %s", 
+			log.Printf("[INFO] Received %d bytes from %s: %s",
 				n, clientAddr.String(), string(data))
 
 			// 处理数据包
@@ -74,7 +74,7 @@ func main() {
 
 func handleUDPPacket(conn *dpdknet.UDPConn, clientAddr *dpdknet.UDPAddr, data []byte) {
 	message := string(data)
-	
+
 	// 生成响应
 	var response string
 	switch message {
@@ -102,6 +102,6 @@ func handleUDPPacket(conn *dpdknet.UDPConn, clientAddr *dpdknet.UDPAddr, data []
 }
 
 func logPacketStats(clientAddr *dpdknet.UDPAddr, receivedBytes, sentBytes int) {
-	log.Printf("[STATS] Client: %s, Received: %d bytes, Sent: %d bytes", 
+	log.Printf("[STATS] Client: %s, Received: %d bytes, Sent: %d bytes",
 		clientAddr.String(), receivedBytes, sentBytes)
 }

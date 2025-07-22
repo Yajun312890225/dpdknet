@@ -14,12 +14,12 @@ import (
 )
 
 type UDPConn struct {
-	localAddr   *UDPAddr
-	remoteAddr  *UDPAddr
-	recvCh      chan []byte
-	mu          sync.Mutex
-	closed      bool
-	listenerKey string // 用于从全局路由器注销
+	localAddr    *UDPAddr
+	remoteAddr   *UDPAddr
+	recvCh       chan []byte
+	mu           sync.Mutex
+	closed       bool
+	listenerKeys []string // 存储所有注册的监听器key
 }
 
 func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
@@ -39,6 +39,7 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 
 	// 注册UDP监听器到全局路由器
 	var key string
+	log.Printf("[DEBUG] laddr.IP = %v, IsUnspecified = %v", laddr.IP, laddr.IP != nil && laddr.IP.IsUnspecified())
 	if laddr.IP == nil || laddr.IP.IsUnspecified() {
 		// 监听所有接口
 		key = fmt.Sprintf("udp:0.0.0.0:%d", laddr.Port)
@@ -47,8 +48,16 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 		// 监听特定接口
 		key = fmt.Sprintf("udp:%s:%d", laddr.IP.String(), laddr.Port)
 		log.Printf("[DEBUG] Registering UDP listener for specific interface: %s", key)
+
+		// 为了兼容性，也注册一个通配符监听器
+		wildcardKey := fmt.Sprintf("udp:0.0.0.0:%d", laddr.Port)
+		log.Printf("[DEBUG] Also registering wildcard UDP listener: %s", wildcardKey)
+		c.listenerKeys = append(c.listenerKeys, wildcardKey)
+		if err := RegisterUDPListener(wildcardKey, c); err != nil {
+			log.Printf("[WARNING] Failed to register wildcard UDP listener: %v", err)
+		}
 	}
-	c.listenerKey = key
+	c.listenerKeys = append(c.listenerKeys, key)
 	if err := RegisterUDPListener(key, c); err != nil {
 		log.Printf("[ERROR] Failed to register UDP listener: %v", err)
 		return nil, err
@@ -231,8 +240,10 @@ func (c *UDPConn) Close() error {
 	c.closed = true
 
 	// 从全局路由器注销监听器
-	if c.listenerKey != "" {
-		UnregisterUDPListener(c.listenerKey)
+	for _, key := range c.listenerKeys {
+		if key != "" {
+			UnregisterUDPListener(key)
+		}
 	}
 
 	close(c.recvCh)
