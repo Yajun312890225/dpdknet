@@ -144,6 +144,15 @@ func (c *UDPConn) WriteToUDP(buf []byte, addr *UDPAddr) (int, error) {
 		return 0, errors.New("invalid destination address")
 	}
 
+	// 我们需要从最近接收到的包中获取正确的MAC地址
+	// 为简化起见，先使用广播地址，让交换机/路由器处理
+	return c.writeUDPWithMAC(buf, addr, [6]uint8{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+}
+
+// writeUDPWithMAC 使用指定的目标MAC地址写入UDP包
+func (c *UDPConn) writeUDPWithMAC(buf []byte, addr *UDPAddr, dstMAC [6]uint8) (int, error) {
+	log.Printf("[DEBUG] WriteToUDP with MAC called: dst=%s:%d, data_len=%d", addr.IP.String(), addr.Port, len(buf))
+
 	// 创建数据包
 	log.Printf("[DEBUG] Creating new packet...")
 	pkt, err := packet.NewPacket()
@@ -167,10 +176,10 @@ func (c *UDPConn) WriteToUDP(buf []byte, addr *UDPAddr) (int, error) {
 	udpHdr := pkt.GetUDPNoCheck()
 	log.Printf("[DEBUG] Got header pointers: eth=%p, ipv4=%p, udp=%p", ethHdr, ipv4Hdr, udpHdr)
 
-	// 设置以太网头 - 使用默认MAC地址
-	ethHdr.DAddr = [6]uint8{0x00, 0x00, 0x00, 0x00, 0x00, 0x00} // 目标MAC
-	ethHdr.SAddr = [6]uint8{0x00, 0x00, 0x00, 0x00, 0x00, 0x01} // 源MAC
-	log.Printf("[DEBUG] Set Ethernet header: dst_mac=00:00:00:00:00:00, src_mac=00:00:00:00:00:01")
+	// 设置以太网头 - 使用广播地址确保包能到达目标
+	ethHdr.DAddr = [6]uint8{0xff, 0xff, 0xff, 0xff, 0xff, 0xff} // 广播MAC地址
+	ethHdr.SAddr = [6]uint8{0x52, 0x54, 0x00, 0x12, 0x34, 0x56} // 使用常见的虚拟机MAC前缀
+	log.Printf("[DEBUG] Set Ethernet header: dst_mac=ff:ff:ff:ff:ff:ff (broadcast), src_mac=52:54:00:12:34:56")
 
 	// 设置源IP地址
 	if c.localAddr != nil && c.localAddr.IP != nil {
