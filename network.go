@@ -139,10 +139,13 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 
 	switch protocol {
 	case 1: // ICMP
+		log.Printf("[DEBUG] Handling ICMP packet")
 		HandleICMPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
 	case 6: // TCP
+		log.Printf("[DEBUG] Handling TCP packet")
 		HandleTCPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
 	case 17: // UDP
+		log.Printf("[DEBUG] Handling UDP packet")
 		handleUDP(data, ipHeaderStart, headerLength, srcIP, dstIP)
 	default:
 		log.Printf("[DEBUG] Unsupported protocol: %d", protocol)
@@ -153,17 +156,20 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 func handleUDP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP) {
 	udpStart := ipHeaderStart + headerLength
 	if len(data) < udpStart+8 {
-		log.Printf("[DEBUG] UDP packet too short")
+		log.Printf("[DEBUG] UDP packet too short: %d bytes, need at least %d", len(data), udpStart+8)
 		return
 	}
 
 	// 解析UDP头
 	srcPort := binary.BigEndian.Uint16(data[udpStart : udpStart+2])
 	dstPort := binary.BigEndian.Uint16(data[udpStart+2 : udpStart+4])
-	log.Printf("[DEBUG] UDP: %s:%d -> %s:%d", srcIP.String(), srcPort, dstIP.String(), dstPort)
+	udpLen := binary.BigEndian.Uint16(data[udpStart+4 : udpStart+6])
+	log.Printf("[DEBUG] UDP: %s:%d -> %s:%d (len=%d)", srcIP.String(), srcPort, dstIP.String(), dstPort, udpLen)
 
 	// 查找对应的UDP监听器
 	key := fmt.Sprintf("udp:%s:%d", dstIP.String(), dstPort)
+	log.Printf("[DEBUG] Looking for UDP listener: %s", key)
+
 	udpListenersMutex.RLock()
 	conn, exists := udpListeners[key]
 	udpListenersMutex.RUnlock()
@@ -171,14 +177,26 @@ func handleUDP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP
 	if !exists {
 		// 尝试通配符匹配 (0.0.0.0:port)
 		wildcardKey := fmt.Sprintf("udp:0.0.0.0:%d", dstPort)
+		log.Printf("[DEBUG] Trying wildcard match: %s", wildcardKey)
+
 		udpListenersMutex.RLock()
 		conn, exists = udpListeners[wildcardKey]
 		udpListenersMutex.RUnlock()
 
 		if !exists {
 			log.Printf("[DEBUG] No UDP listener found for %s or %s", key, wildcardKey)
+			log.Printf("[DEBUG] Available listeners:")
+			udpListenersMutex.RLock()
+			for k := range udpListeners {
+				log.Printf("[DEBUG]   - %s", k)
+			}
+			udpListenersMutex.RUnlock()
 			return
+		} else {
+			log.Printf("[DEBUG] Found wildcard listener: %s", wildcardKey)
 		}
+	} else {
+		log.Printf("[DEBUG] Found exact listener: %s", key)
 	}
 
 	// 复制数据包并发送到对应的连接
@@ -187,7 +205,7 @@ func handleUDP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP
 
 	select {
 	case conn.recvCh <- buf:
-		log.Printf("[DEBUG] UDP packet delivered to listener")
+		log.Printf("[DEBUG] UDP packet delivered to listener successfully")
 	default:
 		log.Printf("[WARNING] UDP listener buffer full, dropping packet")
 	}

@@ -4,6 +4,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/Yajun312890225/nff-go/common"
 	"github.com/Yajun312890225/nff-go/flow"
 )
 
@@ -25,7 +26,7 @@ func Init() error {
 			SchedulerInterval:     100,
 			DPDKArgs:              []string{},
 			// DebugTime:             0,
-			// LogType:               common.No,
+			LogType: common.No,
 		}
 		log.Printf("[DEBUG] Calling flow.SystemInit with config: %+v", config)
 		initErr = flow.SystemInit(&config)

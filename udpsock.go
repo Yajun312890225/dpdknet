@@ -38,7 +38,16 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	log.Printf("[DEBUG] Created UDPConn with localAddr=%v", laddr)
 
 	// 注册UDP监听器到全局路由器
-	key := fmt.Sprintf("udp:%s:%d", laddr.IP.String(), laddr.Port)
+	var key string
+	if laddr.IP == nil || laddr.IP.IsUnspecified() {
+		// 监听所有接口
+		key = fmt.Sprintf("udp:0.0.0.0:%d", laddr.Port)
+		log.Printf("[DEBUG] Registering UDP listener for all interfaces: %s", key)
+	} else {
+		// 监听特定接口
+		key = fmt.Sprintf("udp:%s:%d", laddr.IP.String(), laddr.Port)
+		log.Printf("[DEBUG] Registering UDP listener for specific interface: %s", key)
+	}
 	c.listenerKey = key
 	if err := RegisterUDPListener(key, c); err != nil {
 		log.Printf("[ERROR] Failed to register UDP listener: %v", err)
