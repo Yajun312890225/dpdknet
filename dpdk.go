@@ -3,6 +3,7 @@ package dpdknet
 import (
 	"log"
 	"sync"
+	"time"
 
 	"github.com/Yajun312890225/nff-go/common"
 	"github.com/Yajun312890225/nff-go/flow"
@@ -44,14 +45,20 @@ func Init() error {
 func SystemStart() error {
 	log.Printf("[DEBUG] SystemStart() called")
 	startOnce.Do(func() {
-		log.Printf("[DEBUG] Calling flow.SystemStart...")
-		startErr = flow.SystemStart()
-		if startErr != nil {
-			log.Printf("[ERROR] flow.SystemStart failed: %v", startErr)
-		} else {
-			log.Printf("[INFO] DPDK packet processing system started successfully")
-			isStarted = true
-		}
+		log.Printf("[DEBUG] Starting DPDK packet processing in background...")
+		go func() {
+			log.Printf("[DEBUG] Calling flow.SystemStart in goroutine...")
+			startErr = flow.SystemStart()
+			if startErr != nil {
+				log.Printf("[ERROR] flow.SystemStart failed: %v", startErr)
+			} else {
+				log.Printf("[INFO] DPDK packet processing system started successfully")
+				isStarted = true
+			}
+		}()
+		// 给DPDK一些时间启动
+		time.Sleep(100 * time.Millisecond)
+		log.Printf("[DEBUG] SystemStart setup completed")
 	})
 	return startErr
 }

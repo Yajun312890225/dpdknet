@@ -23,13 +23,15 @@ type UDPConn struct {
 }
 
 func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
-	log.Printf("[DEBUG] ListenUDP called with network=%s, laddr=%v", network, laddr)
+	log.Printf("[DEBUG] === ListenUDP ENTRY === network=%s, laddr=%v", network, laddr)
 
 	// 确保全局DPDK系统已初始化
+	log.Printf("[DEBUG] Calling EnsureGlobalNetworkInit...")
 	if err := EnsureGlobalNetworkInit(); err != nil {
 		log.Printf("[ERROR] Global network init failed: %v", err)
 		return nil, err
 	}
+	log.Printf("[DEBUG] Global network init completed successfully")
 
 	c := &UDPConn{
 		localAddr: laddr,
@@ -54,7 +56,10 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 		log.Printf("[DEBUG] Also registering wildcard UDP listener: %s", wildcardKey)
 		c.listenerKeys = append(c.listenerKeys, wildcardKey)
 		if err := RegisterUDPListener(wildcardKey, c); err != nil {
-			log.Printf("[WARNING] Failed to register wildcard UDP listener: %v", err)
+			log.Printf("[ERROR] Failed to register wildcard UDP listener: %v", err)
+			return nil, err
+		} else {
+			log.Printf("[DEBUG] Wildcard UDP listener registered successfully: %s", wildcardKey)
 		}
 	}
 	c.listenerKeys = append(c.listenerKeys, key)
@@ -64,6 +69,8 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	}
 
 	log.Printf("[DEBUG] UDP listener registered for %s", key)
+	log.Printf("[DEBUG] Total listeners registered: %d", len(c.listenerKeys))
+	log.Printf("[DEBUG] === ListenUDP COMPLETE === returning connection")
 	return c, nil
 }
 
