@@ -238,6 +238,10 @@ func (c *UDPConn) writeUDPWithMAC(buf []byte, addr *UDPAddr, dstMAC [6]uint8) (i
 	copy(data, buf)
 	log.Printf("[DEBUG] Copied %d bytes of user data to packet", len(buf))
 
+	// 计算UDP校验和 (简化实现，设为0表示不使用校验和)
+	udpHdr.DgramCksum = 0
+	log.Printf("[DEBUG] Set UDP checksum to 0 (disabled)")
+
 	// 计算IP头校验和
 	checksum := packet.CalculateIPv4Checksum(ipv4Hdr)
 	ipv4Hdr.HdrChecksum = packet.SwapBytesUint16(checksum)
@@ -245,6 +249,18 @@ func (c *UDPConn) writeUDPWithMAC(buf []byte, addr *UDPAddr, dstMAC [6]uint8) (i
 
 	// 通过全局发送通道发送数据包
 	log.Printf("[DEBUG] Sending packet through global TX channel...")
+	log.Printf("[DEBUG] Final packet raw bytes length: %d", len(pkt.GetRawPacketBytes()))
+
+	// 打印前64字节的包内容用于调试
+	rawBytes := pkt.GetRawPacketBytes()
+	if len(rawBytes) > 0 {
+		debugLen := len(rawBytes)
+		if debugLen > 64 {
+			debugLen = 64
+		}
+		log.Printf("[DEBUG] Packet hex dump (first %d bytes): %x", debugLen, rawBytes[:debugLen])
+	}
+
 	if err := SendPacket(pkt); err != nil {
 		log.Printf("[ERROR] Failed to send packet: %v", err)
 		return 0, err

@@ -215,11 +215,14 @@ func handleUDP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP
 func globalSendGenerator(pkt *packet.Packet, ctx flow.UserContext) {
 	select {
 	case sendPkt := <-globalSendCh:
+		// 复制包内容
 		*pkt = *sendPkt
-		log.Printf("[DEBUG] Global generator: packet prepared for sending")
+		log.Printf("[DEBUG] Global generator: packet prepared for sending, length=%d", len(pkt.GetRawPacketBytes()))
+		return
 	default:
 		// 没有数据包要发送，生成一个空包
 		packet.InitEmptyPacket(pkt, 0)
+		return
 	}
 }
 
@@ -247,11 +250,14 @@ func UnregisterUDPListener(key string) {
 
 // SendPacket 通过全局发送通道发送数据包
 func SendPacket(pkt *packet.Packet) error {
+	log.Printf("[DEBUG] SendPacket called with packet length=%d", len(pkt.GetRawPacketBytes()))
+
 	select {
 	case globalSendCh <- pkt:
-		log.Printf("[DEBUG] Packet queued for sending")
+		log.Printf("[DEBUG] Packet queued for sending in global channel")
 		return nil
 	default:
+		log.Printf("[ERROR] Global send channel full, cannot queue packet")
 		return fmt.Errorf("global send channel full")
 	}
 }
