@@ -211,15 +211,17 @@ func (c *UDPConn) writeUDPWithMAC(buf []byte, addr *UDPAddr, dstMAC [6]uint8) (i
 
 	// 设置源IP地址
 	if c.localAddr != nil && c.localAddr.IP != nil {
-		ipv4Hdr.SrcAddr = packet.SwapBytesIPv4Addr(types.SliceToIPv4(c.localAddr.IP.To4()))
+		srcIP := c.localAddr.IP.To4()
+		ipv4Hdr.SrcAddr = types.IPv4Address(uint32(srcIP[0])<<24 | uint32(srcIP[1])<<16 | uint32(srcIP[2])<<8 | uint32(srcIP[3]))
 		log.Printf("[DEBUG] Set source IP from local address: %s", c.localAddr.IP.String())
 	} else {
-		ipv4Hdr.SrcAddr = types.IPv4Address(0x0100007f) // 127.0.0.1 in network byte order
+		ipv4Hdr.SrcAddr = types.IPv4Address(0x7f000001) // 127.0.0.1 in network byte order
 		log.Printf("[DEBUG] Set default source IP: 127.0.0.1")
 	}
 
 	// 设置目标IP地址
-	ipv4Hdr.DstAddr = packet.SwapBytesIPv4Addr(types.SliceToIPv4(addr.IP.To4()))
+	dstIP := addr.IP.To4()
+	ipv4Hdr.DstAddr = types.IPv4Address(uint32(dstIP[0])<<24 | uint32(dstIP[1])<<16 | uint32(dstIP[2])<<8 | uint32(dstIP[3]))
 	log.Printf("[DEBUG] Set destination IP: %s", addr.IP.String())
 
 	// 设置UDP头
