@@ -58,7 +58,8 @@ func initializeGlobalNetwork() error {
 	dpdkPort := uint16(0)
 	log.Printf("[DEBUG] Using DPDK port %d", dpdkPort)
 
-	// 设置接收流
+	// 流1：接收流 - SetReceiver -> SetHandler -> SetSender
+	log.Printf("[DEBUG] Setting up RX flow...")
 	rxFlow, err := flow.SetReceiver(dpdkPort)
 	if err != nil {
 		log.Printf("[ERROR] Failed to set receiver on DPDK port %d: %v", dpdkPort, err)
@@ -66,17 +67,25 @@ func initializeGlobalNetwork() error {
 	}
 	log.Printf("[DEBUG] Successfully set receiver on DPDK port %d", dpdkPort)
 
-	// 设置全局包处理器 - 根据协议类型分发包
+	// 设置接收处理器
 	flow.SetHandler(rxFlow, globalPacketHandler, nil)
-	log.Printf("[DEBUG] Global packet handler set")
+	log.Printf("[DEBUG] RX packet handler set")
 
-	// 设置发送流
-	globalTxFlow = flow.SetGenerator(globalSendGenerator, nil)
-	if err := flow.SetSender(globalTxFlow, dpdkPort); err != nil {
-		log.Printf("[ERROR] Failed to set sender: %v", err)
+	// 关闭接收流
+	if err := flow.SetSender(rxFlow, dpdkPort); err != nil {
+		log.Printf("[ERROR] Failed to set RX sender: %v", err)
 		return err
 	}
-	log.Printf("[DEBUG] Global TX flow created successfully")
+	log.Printf("[DEBUG] RX flow closed with sender")
+
+	// 流2：发送流 - SetGenerator -> SetSender
+	log.Printf("[DEBUG] Setting up TX flow...")
+	globalTxFlow = flow.SetGenerator(globalSendGenerator, nil)
+	if err := flow.SetSender(globalTxFlow, dpdkPort); err != nil {
+		log.Printf("[ERROR] Failed to set TX sender: %v", err)
+		return err
+	}
+	log.Printf("[DEBUG] TX flow created successfully")
 
 	// 启动DPDK数据包处理系统
 	if !IsStarted() {
@@ -194,7 +203,9 @@ func globalSendGenerator(pkt *packet.Packet, ctx flow.UserContext) {
 		// 没有数据包要发送，生成一个空包
 		packet.InitEmptyPacket(pkt, 0)
 	}
-} // RegisterUDPListener 注册UDP监听器
+}
+
+// RegisterUDPListener 注册UDP监听器
 func RegisterUDPListener(key string, conn *UDPConn) error {
 	udpListenersMutex.Lock()
 	defer udpListenersMutex.Unlock()
@@ -220,6 +231,7 @@ func UnregisterUDPListener(key string) {
 func SendPacket(pkt *packet.Packet) error {
 	select {
 	case globalSendCh <- pkt:
+		log.Printf("[DEBUG] Packet queued for sending")
 		return nil
 	default:
 		return fmt.Errorf("global send channel full")
