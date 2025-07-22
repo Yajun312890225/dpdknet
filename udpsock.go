@@ -209,20 +209,22 @@ func (c *UDPConn) writeUDPWithMAC(buf []byte, addr *UDPAddr, dstMAC [6]uint8) (i
 	log.Printf("[DEBUG] Set Ethernet header: dst_mac=%02x:%02x:%02x:%02x:%02x:%02x, src_mac=52:54:00:1c:9c:b6",
 		dstMAC[0], dstMAC[1], dstMAC[2], dstMAC[3], dstMAC[4], dstMAC[5])
 
-	// 设置源IP地址
+	// 设置源IP地址 (使用主机字节序给types.IPv4Address)
 	if c.localAddr != nil && c.localAddr.IP != nil {
 		srcIP := c.localAddr.IP.To4()
-		ipv4Hdr.SrcAddr = types.IPv4Address(uint32(srcIP[0])<<24 | uint32(srcIP[1])<<16 | uint32(srcIP[2])<<8 | uint32(srcIP[3]))
-		log.Printf("[DEBUG] Set source IP from local address: %s", c.localAddr.IP.String())
+		// types.IPv4Address期望主机字节序，所以反转字节顺序
+		ipv4Hdr.SrcAddr = types.IPv4Address(uint32(srcIP[3])<<24 | uint32(srcIP[2])<<16 | uint32(srcIP[1])<<8 | uint32(srcIP[0]))
+		log.Printf("[DEBUG] Set source IP from local address: %s (0x%08x)", c.localAddr.IP.String(), uint32(ipv4Hdr.SrcAddr))
 	} else {
-		ipv4Hdr.SrcAddr = types.IPv4Address(0x7f000001) // 127.0.0.1 in network byte order
+		ipv4Hdr.SrcAddr = types.IPv4Address(0x7f000001) // 127.0.0.1
 		log.Printf("[DEBUG] Set default source IP: 127.0.0.1")
 	}
 
-	// 设置目标IP地址
-	dstIP := addr.IP.To4()
-	ipv4Hdr.DstAddr = types.IPv4Address(uint32(dstIP[0])<<24 | uint32(dstIP[1])<<16 | uint32(dstIP[2])<<8 | uint32(dstIP[3]))
-	log.Printf("[DEBUG] Set destination IP: %s", addr.IP.String())
+	// 设置目标IP地址 (使用主机字节序给types.IPv4Address)
+	dstIPBytes := addr.IP.To4()
+	// types.IPv4Address期望主机字节序，所以反转字节顺序
+	ipv4Hdr.DstAddr = types.IPv4Address(uint32(dstIPBytes[3])<<24 | uint32(dstIPBytes[2])<<16 | uint32(dstIPBytes[1])<<8 | uint32(dstIPBytes[0]))
+	log.Printf("[DEBUG] Set destination IP: %s (0x%08x)", addr.IP.String(), uint32(ipv4Hdr.DstAddr))
 
 	// 设置UDP头
 	if c.localAddr != nil {
