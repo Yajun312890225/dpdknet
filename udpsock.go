@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/Yajun312890225/nff-go/packet"
-	"github.com/Yajun312890225/nff-go/types"
 )
 
 type UDPConn struct {
@@ -21,47 +20,37 @@ type UDPConn struct {
 	closed       bool
 	listenerKeys []string            // 存储所有注册的监听器key
 	clientMACs   map[string][6]uint8 // 存储客户端IP对应的MAC地址
+	// localMAC     [6]uint8            // 本地真实MAC地址（从接收包中学习）
 }
 
 func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
-	log.Printf("[DEBUG] === ListenUDP ENTRY === network=%s, laddr=%v", network, laddr)
-
 	// 确保全局DPDK系统已初始化
-	log.Printf("[DEBUG] Calling EnsureGlobalNetworkInit...")
 	if err := EnsureGlobalNetworkInit(); err != nil {
 		log.Printf("[ERROR] Global network init failed: %v", err)
 		return nil, err
 	}
-	log.Printf("[DEBUG] Global network init completed successfully")
 
 	c := &UDPConn{
 		localAddr:  laddr,
-		recvCh:     make(chan []byte, 4096),
+		recvCh:     make(chan []byte, 16384), // 增大缓冲区
 		clientMACs: make(map[string][6]uint8),
 	}
-	log.Printf("[DEBUG] Created UDPConn with localAddr=%v", laddr)
 
 	// 注册UDP监听器到全局路由器
 	var key string
-	log.Printf("[DEBUG] laddr.IP = %v, IsUnspecified = %v", laddr.IP, laddr.IP != nil && laddr.IP.IsUnspecified())
 	if laddr.IP == nil || laddr.IP.IsUnspecified() {
 		// 监听所有接口
 		key = fmt.Sprintf("udp:0.0.0.0:%d", laddr.Port)
-		log.Printf("[DEBUG] Registering UDP listener for all interfaces: %s", key)
 	} else {
 		// 监听特定接口
 		key = fmt.Sprintf("udp:%s:%d", laddr.IP.String(), laddr.Port)
-		log.Printf("[DEBUG] Registering UDP listener for specific interface: %s", key)
 
 		// 为了兼容性，也注册一个通配符监听器
 		wildcardKey := fmt.Sprintf("udp:0.0.0.0:%d", laddr.Port)
-		log.Printf("[DEBUG] Also registering wildcard UDP listener: %s", wildcardKey)
 		c.listenerKeys = append(c.listenerKeys, wildcardKey)
 		if err := RegisterUDPListener(wildcardKey, c); err != nil {
 			log.Printf("[ERROR] Failed to register wildcard UDP listener: %v", err)
 			return nil, err
-		} else {
-			log.Printf("[DEBUG] Wildcard UDP listener registered successfully: %s", wildcardKey)
 		}
 	}
 	c.listenerKeys = append(c.listenerKeys, key)
@@ -70,56 +59,41 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 		return nil, err
 	}
 
-	log.Printf("[DEBUG] UDP listener registered for %s", key)
-	log.Printf("[DEBUG] Total listeners registered: %d", len(c.listenerKeys))
-	log.Printf("[DEBUG] === ListenUDP COMPLETE === returning connection")
 	return c, nil
 }
 
 func (c *UDPConn) ReadFromUDP(buf []byte) (int, *UDPAddr, error) {
-	log.Printf("[DEBUG] ReadFromUDP called with buffer size=%d", len(buf))
-
 	if c.closed {
-		log.Printf("[ERROR] ReadFromUDP: connection is closed")
 		return 0, nil, errors.New("connection closed")
 	}
 
-	log.Printf("[DEBUG] Waiting for packet from receive channel...")
 	select {
 	case data, ok := <-c.recvCh:
 		if !ok {
-			log.Printf("[DEBUG] Receive channel closed")
 			return 0, nil, errors.New("connection closed")
 		}
-		log.Printf("[DEBUG] Received packet from channel, raw length=%d", len(data))
 
-		// 提取源MAC地址
+		// 快速提取源MAC地址
 		srcMAC := [6]uint8{}
 		copy(srcMAC[:], data[6:12])
-		log.Printf("[DEBUG] Source MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-			srcMAC[0], srcMAC[1], srcMAC[2], srcMAC[3], srcMAC[4], srcMAC[5])
 
 		ipStart := 14
 		srcIP := net.IPv4(data[ipStart+12], data[ipStart+13], data[ipStart+14], data[ipStart+15])
 		udpStart := ipStart + int((data[ipStart]&0x0F)*4)
 		srcPort := int(binary.BigEndian.Uint16(data[udpStart : udpStart+2]))
 
-		// 保存客户端MAC地址
+		// 保存客户端MAC地址和本地真实MAC地址
 		clientKey := srcIP.String()
 		c.mu.Lock()
 		c.clientMACs[clientKey] = srcMAC
+		// 学习本地真实MAC地址（数据包的目标MAC）
+		// copy(c.localMAC[:], data[0:6])
 		c.mu.Unlock()
-		log.Printf("[DEBUG] Saved client MAC for %s: %02x:%02x:%02x:%02x:%02x:%02x",
-			clientKey, srcMAC[0], srcMAC[1], srcMAC[2], srcMAC[3], srcMAC[4], srcMAC[5])
 
 		payloadStart := udpStart + 8
-		payloadLen := len(data) - payloadStart
-		log.Printf("[DEBUG] Extracting payload: start=%d, length=%d", payloadStart, payloadLen)
-
 		n := copy(buf, data[payloadStart:])
 		addr := &UDPAddr{IP: srcIP, Port: srcPort}
 
-		log.Printf("[DEBUG] ReadFromUDP returning: n=%d, addr=%s:%d", n, addr.IP.String(), addr.Port)
 		return n, addr, nil
 	}
 }
@@ -148,15 +122,11 @@ func (c *UDPConn) WriteTo(buf []byte, addr net.Addr) (int, error) {
 
 // WriteToUDP writes a UDP packet to addr.
 func (c *UDPConn) WriteToUDP(buf []byte, addr *UDPAddr) (int, error) {
-	log.Printf("[DEBUG] WriteToUDP called: dst=%s:%d, data_len=%d", addr.IP.String(), addr.Port, len(buf))
-
 	if c.closed {
-		log.Printf("[ERROR] WriteToUDP: connection is closed")
 		return 0, errors.New("connection closed")
 	}
 
 	if addr == nil || addr.IP == nil {
-		log.Printf("[ERROR] WriteToUDP: invalid destination address")
 		return 0, errors.New("invalid destination address")
 	}
 
@@ -166,113 +136,121 @@ func (c *UDPConn) WriteToUDP(buf []byte, addr *UDPAddr) (int, error) {
 	clientMAC, hasMAC := c.clientMACs[clientKey]
 	c.mu.Unlock()
 
-	if hasMAC {
-		log.Printf("[DEBUG] Found client MAC for %s: %02x:%02x:%02x:%02x:%02x:%02x",
-			clientKey, clientMAC[0], clientMAC[1], clientMAC[2], clientMAC[3], clientMAC[4], clientMAC[5])
-		return c.writeUDPWithMAC(buf, addr, clientMAC)
-	} else {
-		log.Printf("[DEBUG] No MAC found for client %s, using broadcast", clientKey)
-		return c.writeUDPWithMAC(buf, addr, [6]uint8{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	if !hasMAC {
+		// 使用广播 MAC，让网络自动学习路由
+		clientMAC = [6]uint8{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 	}
+	return c.writeUDPWithMAC(buf, addr, clientMAC)
 }
 
 // writeUDPWithMAC 使用指定的目标MAC地址写入UDP包
 func (c *UDPConn) writeUDPWithMAC(buf []byte, addr *UDPAddr, dstMAC [6]uint8) (int, error) {
-	log.Printf("[DEBUG] WriteToUDP with MAC called: dst=%s:%d, data_len=%d", addr.IP.String(), addr.Port, len(buf))
+	// // 获取学习到的本地真实MAC地址
+	// c.mu.Lock()
+	// localMAC := c.localMAC
+	// c.mu.Unlock()
 
-	// 创建数据包
-	log.Printf("[DEBUG] Creating new packet...")
-	pkt, err := packet.NewPacket()
-	if err != nil {
-		log.Printf("[ERROR] Failed to create new packet: %v", err)
-		return 0, err
-	}
-	log.Printf("[DEBUG] Packet created successfully")
+	// // 如果还没有学习到本地MAC，使用默认MAC
+	// if localMAC == [6]uint8{} {
+	localMAC = GetLocalMAC()
+	// }
 
-	// 初始化IPv4 UDP数据包
-	log.Printf("[DEBUG] Initializing IPv4 UDP packet with payload size=%d", len(buf))
-	if !packet.InitEmptyIPv4UDPPacket(pkt, uint(len(buf))) {
-		log.Printf("[ERROR] Failed to initialize IPv4 UDP packet")
-		return 0, errors.New("failed to init IPv4 UDP packet")
-	}
-	log.Printf("[DEBUG] IPv4 UDP packet initialized successfully")
+	// 构建完整的UDP包字节数组，避免使用低效的 packet.NewPacket()
+	totalLen := 14 + 20 + 8 + len(buf) // Ethernet + IP + UDP + payload
+	packetData := make([]byte, totalLen)
 
-	// 获取各层指针
-	ethHdr := pkt.Ether
-	ipv4Hdr := pkt.GetIPv4NoCheck()
-	udpHdr := pkt.GetUDPNoCheck()
-	log.Printf("[DEBUG] Got header pointers: eth=%p, ipv4=%p, udp=%p", ethHdr, ipv4Hdr, udpHdr)
+	// 构建以太网头 (14字节)
+	copy(packetData[0:6], dstMAC[:])    // 目标MAC
+	copy(packetData[6:12], localMAC[:]) // 源MAC
+	packetData[12] = 0x08               // EtherType高字节 (IPv4)
+	packetData[13] = 0x00               // EtherType低字节
 
-	// 设置以太网头 - 使用正确的MAC地址
-	ethHdr.DAddr = dstMAC                                       // 目标MAC（客户端）
-	ethHdr.SAddr = [6]uint8{0x52, 0x54, 0x00, 0x1c, 0x9c, 0xb6} // 服务器的真实MAC地址
-	log.Printf("[DEBUG] Set Ethernet header: dst_mac=%02x:%02x:%02x:%02x:%02x:%02x, src_mac=52:54:00:1c:9c:b6",
-		dstMAC[0], dstMAC[1], dstMAC[2], dstMAC[3], dstMAC[4], dstMAC[5])
+	// 构建IP头 (20字节)
+	ipStart := 14
+	packetData[ipStart] = 0x45                                                // 版本(4) + 头长度(5*4=20)
+	packetData[ipStart+1] = 0x00                                              // TOS
+	binary.BigEndian.PutUint16(packetData[ipStart+2:], uint16(20+8+len(buf))) // 总长度
+	binary.BigEndian.PutUint16(packetData[ipStart+4:], 0x0000)                // ID
+	binary.BigEndian.PutUint16(packetData[ipStart+6:], 0x4000)                // 标志位和片偏移
+	packetData[ipStart+8] = 64                                                // TTL
+	packetData[ipStart+9] = 17                                                // 协议: UDP
 
-	// 设置源IP地址 (使用主机字节序给types.IPv4Address)
+	// 设置源IP地址
 	if c.localAddr != nil && c.localAddr.IP != nil {
 		srcIP := c.localAddr.IP.To4()
-		// types.IPv4Address期望主机字节序，所以反转字节顺序
-		ipv4Hdr.SrcAddr = types.IPv4Address(uint32(srcIP[3])<<24 | uint32(srcIP[2])<<16 | uint32(srcIP[1])<<8 | uint32(srcIP[0]))
-		log.Printf("[DEBUG] Set source IP from local address: %s (0x%08x)", c.localAddr.IP.String(), uint32(ipv4Hdr.SrcAddr))
+		copy(packetData[ipStart+12:ipStart+16], srcIP)
 	} else {
-		ipv4Hdr.SrcAddr = types.IPv4Address(0x7f000001) // 127.0.0.1
-		log.Printf("[DEBUG] Set default source IP: 127.0.0.1")
+		// 默认127.0.0.1
+		packetData[ipStart+12] = 127
+		packetData[ipStart+13] = 0
+		packetData[ipStart+14] = 0
+		packetData[ipStart+15] = 1
 	}
 
-	// 设置目标IP地址 (使用主机字节序给types.IPv4Address)
+	// 设置目标IP地址
 	dstIPBytes := addr.IP.To4()
-	// types.IPv4Address期望主机字节序，所以反转字节顺序
-	ipv4Hdr.DstAddr = types.IPv4Address(uint32(dstIPBytes[3])<<24 | uint32(dstIPBytes[2])<<16 | uint32(dstIPBytes[1])<<8 | uint32(dstIPBytes[0]))
-	log.Printf("[DEBUG] Set destination IP: %s (0x%08x)", addr.IP.String(), uint32(ipv4Hdr.DstAddr))
+	copy(packetData[ipStart+16:ipStart+20], dstIPBytes)
 
-	// 设置UDP头
+	// 构建UDP头 (8字节)
+	udpStart := ipStart + 20
 	if c.localAddr != nil {
-		udpHdr.SrcPort = packet.SwapBytesUint16(uint16(c.localAddr.Port))
-		log.Printf("[DEBUG] Set source port from local address: %d", c.localAddr.Port)
+		binary.BigEndian.PutUint16(packetData[udpStart:], uint16(c.localAddr.Port))
 	} else {
-		udpHdr.SrcPort = 0
-		log.Printf("[DEBUG] Set default source port: 0")
+		binary.BigEndian.PutUint16(packetData[udpStart:], 0)
 	}
-	udpHdr.DstPort = packet.SwapBytesUint16(uint16(addr.Port))
-	log.Printf("[DEBUG] Set destination port: %d", addr.Port)
+	binary.BigEndian.PutUint16(packetData[udpStart+2:], uint16(addr.Port))
+	binary.BigEndian.PutUint16(packetData[udpStart+4:], uint16(8+len(buf))) // UDP长度
+	binary.BigEndian.PutUint16(packetData[udpStart+6:], 0)                  // 校验和，稍后计算
 
 	// 复制用户数据
-	data := (*[1 << 30]byte)(pkt.Data)[:len(buf)]
-	copy(data, buf)
-	log.Printf("[DEBUG] Copied %d bytes of user data to packet", len(buf))
+	copy(packetData[udpStart+8:], buf)
 
-	// 计算UDP校验和 (简化实现，设为0表示不使用校验和)
-	udpHdr.DgramCksum = 0
-	log.Printf("[DEBUG] Set UDP checksum to 0 (disabled)")
+	// 计算IP校验和
+	binary.BigEndian.PutUint16(packetData[ipStart+10:], 0) // 清零校验和字段
+	ipChecksum := calculateIPChecksum(packetData[ipStart : ipStart+20])
+	binary.BigEndian.PutUint16(packetData[ipStart+10:], ipChecksum)
 
-	// 计算IP头校验和
-	checksum := packet.CalculateIPv4Checksum(ipv4Hdr)
-	ipv4Hdr.HdrChecksum = packet.SwapBytesUint16(checksum)
-	log.Printf("[DEBUG] Calculated IP header checksum: 0x%04x", checksum)
+	// 计算UDP校验和（简化为0，很多实现都这样做）
+	binary.BigEndian.PutUint16(packetData[udpStart+6:], 0)
 
-	// 通过全局发送通道发送数据包
-	log.Printf("[DEBUG] Sending packet through global TX channel...")
-	log.Printf("[DEBUG] Final packet raw bytes length: %d", len(pkt.GetRawPacketBytes()))
-
-	// 打印前64字节的包内容用于调试
-	rawBytes := pkt.GetRawPacketBytes()
-	if len(rawBytes) > 0 {
-		debugLen := len(rawBytes)
-		if debugLen > 64 {
-			debugLen = 64
-		}
-		log.Printf("[DEBUG] Packet hex dump (first %d bytes): %x", debugLen, rawBytes[:debugLen])
+	// 验证数据包内容（偶尔记录）
+	if len(buf)%100 == 0 { // 只记录每100个包中的某些包
+		log.Printf("[DEBUG] Packet: expected=%d bytes, actual=%d bytes, payload=%d",
+			totalLen, len(packetData), len(buf))
 	}
 
-	if err := SendPacket(pkt); err != nil {
-		log.Printf("[ERROR] Failed to send packet: %v", err)
+	// 回退到使用 NewPacket，但尽量优化使用方式
+	tempPkt, err := packet.NewPacket()
+	if err != nil {
+		log.Printf("[ERROR] Failed to create temp packet: %v", err)
 		return 0, err
 	}
 
-	log.Printf("[INFO] UDP packet sent to %s:%d (len=%d)", addr.IP.String(), addr.Port, len(buf))
-	log.Printf("[DEBUG] WriteToUDP completed successfully")
+	// 使用 GeneratePacketFromByte 填充包
+	if !packet.GeneratePacketFromByte(tempPkt, packetData) {
+		log.Printf("[ERROR] Failed to generate packet from bytes")
+		return 0, errors.New("failed to generate packet")
+	}
+
+	// 发送数据包
+	if err := SendPacket(tempPkt); err != nil {
+		log.Printf("[ERROR] Failed to send packet to %s:%d: %v", addr.IP.String(), addr.Port, err)
+		return 0, err
+	}
+
 	return len(buf), nil
+}
+
+// calculateIPChecksum 计算IP头校验和
+func calculateIPChecksum(header []byte) uint16 {
+	sum := uint32(0)
+	for i := 0; i < len(header); i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(header[i : i+2]))
+	}
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+	return ^uint16(sum)
 }
 
 // Write writes data to the connection.

@@ -17,19 +17,24 @@ var (
 	globalNetworkErr  error
 	globalTxFlow      *flow.Flow
 	globalSendCh      chan *packet.Packet
+	globalBytesCh     chan []byte // 高性能字节发送通道
 	udpListeners      map[string]*UDPConn
 	tcpListeners      map[string]*TCPListener
 	icmpHandlers      map[string]func([]byte, int, int, net.IP, net.IP) // ICMP处理器
 	udpListenersMutex sync.RWMutex
 	tcpListenersMutex sync.RWMutex
 	icmpHandlersMutex sync.RWMutex
+	localMAC          [6]uint8 // 本地网卡 MAC 地址
 )
 
 func init() {
 	udpListeners = make(map[string]*UDPConn)
 	tcpListeners = make(map[string]*TCPListener)
 	icmpHandlers = make(map[string]func([]byte, int, int, net.IP, net.IP))
-	globalSendCh = make(chan *packet.Packet, 4096)
+	globalSendCh = make(chan *packet.Packet, 65536) // 进一步增大发送缓冲区到64K
+	globalBytesCh = make(chan []byte, 65536)        // 高性能字节通道
+	// 设置默认 MAC 地址，稍后可以通过 DPDK 获取真实 MAC
+	localMAC = [6]uint8{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
 }
 
 // EnsureGlobalNetworkInit 确保全局网络系统只初始化一次
@@ -71,6 +76,7 @@ func initializeGlobalNetwork() error {
 	flow.SetHandler(rxFlow, globalPacketHandler, nil)
 	log.Printf("[DEBUG] RX packet handler set")
 
+	localMAC = flow.GetPortMACAddress(dpdkPort)
 	// 关闭接收流
 	if err := flow.SetSender(rxFlow, dpdkPort); err != nil {
 		log.Printf("[ERROR] Failed to set RX sender: %v", err)
@@ -105,23 +111,19 @@ func initializeGlobalNetwork() error {
 // globalPacketHandler 全局包处理器，根据协议类型分发包
 func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 	data := pkt.GetRawPacketBytes()
-	log.Printf("[DEBUG] Received packet, raw length=%d bytes", len(data))
 
-	// 检查以太网帧长度
+	// 快速检查以太网帧长度
 	if len(data) < 14 {
-		log.Printf("[DEBUG] Packet too short: %d bytes", len(data))
 		return
 	}
 
-	// 检查是否为IP协议 (EtherType = 0x0800)
+	// 快速检查是否为IP协议 (EtherType = 0x0800)
 	if data[12] != 0x08 || data[13] != 0x00 {
-		log.Printf("[DEBUG] Not IPv4 packet: EtherType=0x%02x%02x", data[12], data[13])
 		return
 	}
 
 	ipHeaderStart := 14
 	if len(data) < ipHeaderStart+20 {
-		log.Printf("[DEBUG] IPv4 packet too short")
 		return
 	}
 
@@ -135,20 +137,16 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 	srcIP := net.IPv4(data[ipHeaderStart+12], data[ipHeaderStart+13],
 		data[ipHeaderStart+14], data[ipHeaderStart+15])
 
-	log.Printf("[DEBUG] Protocol=%d, src=%s, dst=%s", protocol, srcIP.String(), dstIP.String())
-
+	// 只处理 UDP/TCP，ICMP 暂时禁用以避免影响 UDP 性能
 	switch protocol {
-	case 1: // ICMP
-		log.Printf("[DEBUG] Handling ICMP packet")
-		HandleICMPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
-	case 6: // TCP
-		log.Printf("[DEBUG] Handling TCP packet")
-		HandleTCPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
 	case 17: // UDP
-		log.Printf("[DEBUG] Handling UDP packet")
 		handleUDP(data, ipHeaderStart, headerLength, srcIP, dstIP)
+	case 6: // TCP
+		HandleTCPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
+	// case 1: // ICMP - 暂时禁用
+	//	HandleICMPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
 	default:
-		log.Printf("[DEBUG] Unsupported protocol: %d", protocol)
+		return
 	}
 }
 
@@ -156,20 +154,17 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 func handleUDP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP) {
 	udpStart := ipHeaderStart + headerLength
 	if len(data) < udpStart+8 {
-		log.Printf("[DEBUG] UDP packet too short: %d bytes, need at least %d", len(data), udpStart+8)
+		log.Printf("[WARNING] UDP packet too short: %d bytes, need at least %d", len(data), udpStart+8)
 		return
 	}
 
 	// 解析UDP头
-	srcPort := binary.BigEndian.Uint16(data[udpStart : udpStart+2])
+	// srcPort := binary.BigEndian.Uint16(data[udpStart : udpStart+2])
 	dstPort := binary.BigEndian.Uint16(data[udpStart+2 : udpStart+4])
-	udpLen := binary.BigEndian.Uint16(data[udpStart+4 : udpStart+6])
-	log.Printf("[DEBUG] UDP: %s:%d -> %s:%d (len=%d)", srcIP.String(), srcPort, dstIP.String(), dstPort, udpLen)
+	// udpLen := binary.BigEndian.Uint16(data[udpStart+4 : udpStart+6])
 
 	// 查找对应的UDP监听器
 	key := fmt.Sprintf("udp:%s:%d", dstIP.String(), dstPort)
-	log.Printf("[DEBUG] Looking for UDP listener: %s", key)
-
 	udpListenersMutex.RLock()
 	conn, exists := udpListeners[key]
 	udpListenersMutex.RUnlock()
@@ -177,27 +172,24 @@ func handleUDP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP
 	if !exists {
 		// 尝试通配符匹配 (0.0.0.0:port)
 		wildcardKey := fmt.Sprintf("udp:0.0.0.0:%d", dstPort)
-		log.Printf("[DEBUG] Trying wildcard match: %s", wildcardKey)
-
 		udpListenersMutex.RLock()
 		conn, exists = udpListeners[wildcardKey]
 		udpListenersMutex.RUnlock()
-
 		if !exists {
-			log.Printf("[DEBUG] No UDP listener found for %s or %s", key, wildcardKey)
-			log.Printf("[DEBUG] Available listeners:")
-			udpListenersMutex.RLock()
-			for k := range udpListeners {
-				log.Printf("[DEBUG]   - %s", k)
-			}
-			udpListenersMutex.RUnlock()
 			return
-		} else {
-			log.Printf("[DEBUG] Found wildcard listener: %s", wildcardKey)
 		}
-	} else {
-		log.Printf("[DEBUG] Found exact listener: %s", key)
 	}
+
+	// 学习并保存客户端的MAC地址，用于后续回复
+	clientKey := srcIP.String()
+	conn.mu.Lock()
+	srcMAC := [6]uint8{}
+	copy(srcMAC[:], data[6:12]) // 提取源MAC地址
+	conn.clientMACs[clientKey] = srcMAC
+
+	// 同时学习本地真实MAC地址（目标MAC）
+	// copy(conn.localMAC[:], data[0:6])
+	conn.mu.Unlock()
 
 	// 复制数据包并发送到对应的连接
 	buf := make([]byte, len(data))
@@ -205,19 +197,38 @@ func handleUDP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP
 
 	select {
 	case conn.recvCh <- buf:
-		log.Printf("[DEBUG] UDP packet delivered to listener successfully")
+		// 正常投递不打印日志
 	default:
 		log.Printf("[WARNING] UDP listener buffer full, dropping packet")
 	}
 }
 
-// globalSendGenerator 全局发送生成器
+// globalSendGenerator 全局发送生成器 - 简化为只处理包通道
 func globalSendGenerator(pkt *packet.Packet, ctx flow.UserContext) {
 	select {
 	case sendPkt := <-globalSendCh:
-		// 复制包内容
-		*pkt = *sendPkt
-		log.Printf("[DEBUG] Global generator: packet prepared for sending, length=%d", len(pkt.GetRawPacketBytes()))
+		// 获取要发送的数据包的原始字节
+		sendData := sendPkt.GetRawPacketBytes()
+		if len(sendData) == 0 {
+			log.Printf("[ERROR] Send packet has no data")
+			packet.InitEmptyPacket(pkt, 0)
+			return
+		}
+
+		// 使用高性能的 GeneratePacketFromByte 直接在提供的 pkt 中生成
+		// 这避免了低效的 NewPacket() 调用
+		if !packet.GeneratePacketFromByte(pkt, sendData) {
+			log.Printf("[ERROR] Failed to generate packet from bytes")
+			packet.InitEmptyPacket(pkt, 0)
+			return
+		}
+
+		// 只在队列积压严重时才记录警告
+		queueLen := len(globalSendCh)
+		if queueLen > 10000 {
+			log.Printf("[WARNING] High packet send queue: %d", queueLen)
+		}
+
 		return
 	default:
 		// 没有数据包要发送，生成一个空包
@@ -236,7 +247,6 @@ func RegisterUDPListener(key string, conn *UDPConn) error {
 	}
 
 	udpListeners[key] = conn
-	log.Printf("[DEBUG] Registered UDP listener: %s", key)
 	return nil
 }
 
@@ -245,21 +255,60 @@ func UnregisterUDPListener(key string) {
 	udpListenersMutex.Lock()
 	defer udpListenersMutex.Unlock()
 	delete(udpListeners, key)
-	log.Printf("[DEBUG] Unregistered UDP listener: %s", key)
 }
 
-// SendPacket 通过全局发送通道发送数据包
-func SendPacket(pkt *packet.Packet) error {
-	log.Printf("[DEBUG] SendPacket called with packet length=%d", len(pkt.GetRawPacketBytes()))
+// SendRawBytes 直接发送字节数组，避免使用 packet.NewPacket()
+func SendRawBytes(data []byte) error {
+	if len(data) == 0 {
+		return fmt.Errorf("cannot send empty data")
+	}
 
+	// 检查当前队列状态
+	queueLen := len(globalBytesCh)
+	if queueLen > 32000 { // 如果队列使用超过50%，记录警告
+		log.Printf("[WARNING] Byte send queue is %d%% full (%d/65536)",
+			(queueLen*100)/65536, queueLen)
+	}
+
+	// 直接非阻塞发送，如果失败就立即报错，不重试
 	select {
-	case globalSendCh <- pkt:
-		log.Printf("[DEBUG] Packet queued for sending in global channel")
+	case globalBytesCh <- data:
+		// 成功发送，偶尔记录统计信息
+		if queueLen%1000 == 0 && queueLen > 0 {
+			log.Printf("[DEBUG] Byte queue length: %d", queueLen)
+		}
 		return nil
 	default:
-		log.Printf("[ERROR] Global send channel full, cannot queue packet")
+		// 队列满时立即失败，不重试（避免阻塞）
+		log.Printf("[ERROR] Byte send queue full (%d/65536), dropping packet immediately", len(globalBytesCh))
+		return fmt.Errorf("global byte send channel full")
+	}
+}
+
+// SendPacket 通过全局发送通道发送数据包，非阻塞
+func SendPacket(pkt *packet.Packet) error {
+	// 只尝试非阻塞发送，避免任何形式的延迟
+	select {
+	case globalSendCh <- pkt:
+		return nil
+	default:
+		// 队列满时立即失败，不重试（避免阻塞和延迟）
+		log.Printf("[ERROR] Send queue full (%d/65536), dropping packet immediately", len(globalSendCh))
 		return fmt.Errorf("global send channel full")
 	}
+}
+
+// SendPacketReliable 可靠发送数据包，阻塞直到发送成功
+func SendPacketReliable(pkt *packet.Packet) error {
+	// 阻塞发送，确保包一定被放入队列
+	globalSendCh <- pkt
+	return nil
+}
+
+// FlushSendQueue 强制刷新发送队列 (调试用)
+func FlushSendQueue() {
+	// 这里可以添加强制刷新逻辑
+	log.Printf("[DEBUG] Send queue length: %d", len(globalSendCh))
 }
 
 // RegisterTCPListener 注册TCP监听器
@@ -367,4 +416,9 @@ func calcIPChecksum(data []byte) uint16 {
 		sum = (sum & 0xFFFF) + (sum >> 16)
 	}
 	return ^uint16(sum)
+}
+
+// GetLocalMAC 获取本地网卡 MAC 地址
+func GetLocalMAC() [6]uint8 {
+	return localMAC
 }
