@@ -95,7 +95,13 @@ func (l *TCPListener) Accept() (net.Conn, error) {
 
 	// 从连接队列中获取新连接
 	select {
-	case conn := <-l.connCh:
+	case conn, ok := <-l.connCh:
+		if !ok {
+			return nil, errors.New("listener closed")
+		}
+		if conn == nil {
+			return nil, errors.New("received nil connection")
+		}
 		log.Printf("[DEBUG] Accepted new TCP connection: %s -> %s",
 			conn.remoteAddr.String(), conn.localAddr.String())
 		return conn, nil
@@ -309,13 +315,62 @@ func findTCPListener(key string) *TCPListener {
 }
 
 // processTCPPacketForListener 为指定的监听器处理TCP数据包
+// 简易连接表（真实实现应加锁和超时清理）
+var (
+	tcpConnTable      = make(map[string]*TCPConn)
+	tcpConnTableMutex sync.Mutex
+	tcpConnLastActive = make(map[string]time.Time)
+)
+
+// 启动后台定时清理协程（只需启动一次）
+func init() {
+	go func() {
+		for {
+			time.Sleep(60 * time.Second)
+			now := time.Now()
+			tcpConnTableMutex.Lock()
+			for key, conn := range tcpConnTable {
+				last, ok := tcpConnLastActive[key]
+				if !ok {
+					last = now
+				}
+				// 10分钟无活跃自动清理
+				if now.Sub(last) > 10*time.Minute {
+					conn.closed = true
+					close(conn.dataCh)
+					delete(tcpConnTable, key)
+					delete(tcpConnLastActive, key)
+					log.Printf("[INFO] TCP connection %s idle timeout, removed", key)
+				}
+			}
+			tcpConnTableMutex.Unlock()
+		}
+	}()
+}
+
 func processTCPPacketForListener(listener *TCPListener, data []byte, tcpStart int, srcIP net.IP, srcPort uint16, dstIP net.IP, dstPort uint16, seqNum, ackNum uint32, flags uint8) {
 	log.Printf("[DEBUG] Processing TCP packet for listener: flags=0x%02x", flags)
 
+	connKey := fmt.Sprintf("%s:%d-%s:%d", srcIP.String(), srcPort, dstIP.String(), dstPort)
+	now := time.Now()
+
 	// 如果是SYN包，创建新连接
 	if flags&TCPFlagSYN != 0 && flags&TCPFlagACK == 0 { // SYN 且没有 ACK
-		log.Printf("[DEBUG] Received SYN, creating new connection")
+		log.Printf("[DEBUG] Received SYN from %s", connKey)
 
+		// 检查连接是否已经存在，避免重复创建
+		tcpConnTableMutex.Lock()
+		existingConn, exists := tcpConnTable[connKey]
+		if exists {
+			// 连接已存在，更新活跃时间并重发SYN+ACK
+			tcpConnLastActive[connKey] = now
+			tcpConnTableMutex.Unlock()
+			log.Printf("[DEBUG] Connection already exists, resending SYN+ACK")
+			sendTCPSynAckForListener(srcIP, srcPort, dstIP, dstPort, seqNum+1, existingConn.seqNum)
+			return
+		}
+
+		// 创建新连接
 		conn := &TCPConn{
 			localAddr: &TCPAddr{
 				IP:   dstIP,
@@ -331,35 +386,94 @@ func processTCPPacketForListener(listener *TCPListener, data []byte, tcpStart in
 			state:  TCPStateSynReceived,
 		}
 
-		// 发送SYN+ACK响应
-		sendTCPSynAckForListener(srcIP, srcPort, dstIP, dstPort, seqNum+1, conn.seqNum)
+		// 保存到连接表，但不放入accept队列
+		tcpConnTable[connKey] = conn
+		tcpConnLastActive[connKey] = now
+		tcpConnTableMutex.Unlock()
 
-		// 将连接放入accept队列
-		select {
-		case listener.connCh <- conn:
-			log.Printf("[DEBUG] New TCP connection queued for accept")
-		default:
-			log.Printf("[WARNING] TCP accept queue full")
-		}
+		log.Printf("[DEBUG] Created new connection, sending SYN+ACK (our_seq=%d, ack=%d)", conn.seqNum, conn.ackNum)
+
+		// 发送SYN+ACK响应
+		sendTCPSynAckForListener(srcIP, srcPort, dstIP, dstPort, conn.ackNum, conn.seqNum)
+
+		// 启动超时清理协程
+		go func(key string, c *TCPConn) {
+			select {
+			case <-time.After(120 * time.Second):
+				tcpConnTableMutex.Lock()
+				if tcpConnTable[key] == c && c.state != TCPStateEstablished {
+					log.Printf("[INFO] TCP connection %s timeout, removing", key)
+					delete(tcpConnTable, key)
+					delete(tcpConnLastActive, key)
+				}
+				tcpConnTableMutex.Unlock()
+			case <-c.dataCh:
+				// 有数据则不清理
+			}
+		}(connKey, conn)
+
 		return
 	}
 
-	// 处理已建立连接的数据包
-	// 查找现有连接 (简化实现，实际应该维护连接映射表)
-	if flags&TCPFlagACK != 0 {
+	// 收到ACK包，完成三次握手，设为Established
+	if flags&TCPFlagACK != 0 && flags&TCPFlagSYN == 0 {
+		tcpConnTableMutex.Lock()
+		conn, ok := tcpConnTable[connKey]
+		if ok && conn.state == TCPStateSynReceived {
+			// 验证ACK号是否正确 (应该是我们的seq+1)
+			expectedAck := conn.seqNum + 1
+			if ackNum == expectedAck {
+				conn.state = TCPStateEstablished
+				conn.seqNum++ // 增加我们的序列号
+				log.Printf("[DEBUG] TCP connection established for %s (ack=%d, expected=%d)", connKey, ackNum, expectedAck)
+
+				// 三次握手完成，现在将连接放入accept队列
+				select {
+				case listener.connCh <- conn:
+					log.Printf("[DEBUG] TCP connection queued for accept after handshake")
+				default:
+					log.Printf("[WARNING] TCP accept queue full after handshake")
+				}
+			} else {
+				log.Printf("[WARNING] Invalid ACK number: got %d, expected %d", ackNum, expectedAck)
+			}
+		}
+		// 活跃时间更新
+		if ok {
+			tcpConnLastActive[connKey] = now
+		}
+		tcpConnTableMutex.Unlock()
+
 		// 解析数据部分
 		tcpHeaderLen := int((data[tcpStart+12] >> 4) * 4)
 		dataStart := tcpStart + tcpHeaderLen
 		payloadLen := len(data) - dataStart
 
-		if payloadLen > 0 {
+		if ok && payloadLen > 0 {
 			log.Printf("[DEBUG] Received %d bytes of TCP data", payloadLen)
-			// 这里应该将数据传递给对应的连接
-			// 简化处理，暂时只记录日志
-
+			// 投递数据到连接
+			conn.dataCh <- data[dataStart:]
 			// 发送ACK确认
 			sendTCPAck(srcIP, srcPort, dstIP, dstPort, ackNum, seqNum+uint32(payloadLen))
+			// 活跃时间更新
+			tcpConnTableMutex.Lock()
+			tcpConnLastActive[connKey] = now
+			tcpConnTableMutex.Unlock()
 		}
+	}
+
+	// FIN包关闭连接
+	if flags&TCPFlagFIN != 0 {
+		tcpConnTableMutex.Lock()
+		conn, ok := tcpConnTable[connKey]
+		if ok {
+			conn.closed = true
+			close(conn.dataCh)
+			delete(tcpConnTable, connKey)
+			delete(tcpConnLastActive, connKey)
+			log.Printf("[INFO] TCP connection %s closed and removed", connKey)
+		}
+		tcpConnTableMutex.Unlock()
 	}
 }
 
@@ -376,7 +490,8 @@ func sendTCPAck(dstIP net.IP, dstPort uint16, srcIP net.IP, srcPort uint16, seqN
 
 // sendTCPSynAckForListener 发送TCP SYN+ACK响应
 func sendTCPSynAckForListener(dstIP net.IP, dstPort uint16, srcIP net.IP, srcPort uint16, ackNum, seqNum uint32) {
-	log.Printf("[DEBUG] Sending TCP SYN+ACK reply from %s:%d to %s:%d", srcIP.String(), srcPort, dstIP.String(), dstPort)
+	log.Printf("[DEBUG] Sending TCP SYN+ACK reply from %s:%d to %s:%d (seq=%d, ack=%d)",
+		srcIP.String(), srcPort, dstIP.String(), dstPort, seqNum, ackNum)
 
 	// 使用全局网络系统发送SYN+ACK包
 	flags := uint8(TCPFlagSYN | TCPFlagACK)
@@ -384,6 +499,6 @@ func sendTCPSynAckForListener(dstIP net.IP, dstPort uint16, srcIP net.IP, srcPor
 	if err != nil {
 		log.Printf("[ERROR] Failed to send TCP SYN+ACK: %v", err)
 	} else {
-		log.Printf("[DEBUG] TCP SYN+ACK sent successfully")
+		log.Printf("[DEBUG] TCP SYN+ACK sent successfully (seq=%d, ack=%d)", seqNum, ackNum)
 	}
 }

@@ -313,67 +313,87 @@ func FindTCPListenerByKey(key string) *TCPListener {
 
 // SendTCPPacket 发送TCP数据包
 func SendTCPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, seqNum, ackNum uint32, flags uint8, data []byte) error {
-	// 创建新的数据包
-	pkt, err := packet.NewPacket()
-	if err != nil {
-		return fmt.Errorf("failed to create packet: %v", err)
-	}
-
 	// 构建以太网帧 + IP头 + TCP头 + 数据
 	totalLen := 14 + 20 + 20 + len(data) // 以太网头 + IP头 + TCP头 + 数据
-	rawData := pkt.GetRawPacketBytes()
 
-	// 确保有足够空间
-	if len(rawData) < totalLen {
-		return fmt.Errorf("packet buffer too small")
+	// 从切片池获取缓冲区
+	pooledSlice := packetPool.Get().([]byte)
+	var packetData []byte
+	var usePoolSlice bool
+
+	// 如果池中的切片不够大，则创建新的切片
+	if len(pooledSlice) >= totalLen {
+		packetData = pooledSlice[:totalLen] // 使用池中的切片，调整长度
+		usePoolSlice = true
+	} else {
+		// 池中切片太小，创建新的切片，并立即归还小切片
+		packetData = make([]byte, totalLen)
+		packetPool.Put(pooledSlice) // 立即归还小切片
+		usePoolSlice = false
+		log.Printf("[DEBUG] Pool slice too small (%d < %d) for TCP packet, allocating new slice",
+			len(pooledSlice), totalLen)
 	}
 
+	// 获取本地MAC地址
+	localMAC := GetLocalMAC()
+
 	// 构建以太网头 (简化处理，使用广播地址)
-	copy(rawData[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})  // 目标MAC
-	copy(rawData[6:12], []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}) // 源MAC
-	binary.BigEndian.PutUint16(rawData[12:14], 0x0800)              // EtherType: IPv4
+	copy(packetData[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // 目标MAC
+	copy(packetData[6:12], localMAC[:])                               // 源MAC
+	binary.BigEndian.PutUint16(packetData[12:14], 0x0800)             // EtherType: IPv4
 
 	// 构建IP头
 	ipStart := 14
-	rawData[ipStart] = 0x45                                                           // 版本和头长度
-	rawData[ipStart+1] = 0x00                                                         // TOS
-	binary.BigEndian.PutUint16(rawData[ipStart+2:ipStart+4], uint16(20+20+len(data))) // 总长度
-	binary.BigEndian.PutUint16(rawData[ipStart+4:ipStart+6], 0x1234)                  // ID
-	binary.BigEndian.PutUint16(rawData[ipStart+6:ipStart+8], 0x4000)                  // 标志和片偏移
-	rawData[ipStart+8] = 64                                                           // TTL
-	rawData[ipStart+9] = 6                                                            // 协议: TCP
-	binary.BigEndian.PutUint16(rawData[ipStart+10:ipStart+12], 0)                     // 校验和(稍后计算)
-	copy(rawData[ipStart+12:ipStart+16], srcIP.To4())                                 // 源IP
-	copy(rawData[ipStart+16:ipStart+20], dstIP.To4())                                 // 目标IP
+	packetData[ipStart] = 0x45                                                           // 版本和头长度
+	packetData[ipStart+1] = 0x00                                                         // TOS
+	binary.BigEndian.PutUint16(packetData[ipStart+2:ipStart+4], uint16(20+20+len(data))) // 总长度
+	binary.BigEndian.PutUint16(packetData[ipStart+4:ipStart+6], 0x1234)                  // ID
+	binary.BigEndian.PutUint16(packetData[ipStart+6:ipStart+8], 0x4000)                  // 标志和片偏移
+	packetData[ipStart+8] = 64                                                           // TTL
+	packetData[ipStart+9] = 6                                                            // 协议: TCP
+	binary.BigEndian.PutUint16(packetData[ipStart+10:ipStart+12], 0)                     // 校验和(稍后计算)
+	copy(packetData[ipStart+12:ipStart+16], srcIP.To4())                                 // 源IP
+	copy(packetData[ipStart+16:ipStart+20], dstIP.To4())                                 // 目标IP
 
 	// 构建TCP头
 	tcpStart := ipStart + 20
-	binary.BigEndian.PutUint16(rawData[tcpStart:tcpStart+2], srcPort)   // 源端口
-	binary.BigEndian.PutUint16(rawData[tcpStart+2:tcpStart+4], dstPort) // 目标端口
-	binary.BigEndian.PutUint32(rawData[tcpStart+4:tcpStart+8], seqNum)  // 序列号
-	binary.BigEndian.PutUint32(rawData[tcpStart+8:tcpStart+12], ackNum) // 确认号
-	rawData[tcpStart+12] = 0x50                                         // 数据偏移 (20字节)
-	rawData[tcpStart+13] = flags                                        // 标志位
-	binary.BigEndian.PutUint16(rawData[tcpStart+14:tcpStart+16], 65535) // 窗口大小
-	binary.BigEndian.PutUint16(rawData[tcpStart+16:tcpStart+18], 0)     // 校验和(稍后计算)
-	binary.BigEndian.PutUint16(rawData[tcpStart+18:tcpStart+20], 0)     // 紧急指针
+	binary.BigEndian.PutUint16(packetData[tcpStart:tcpStart+2], srcPort)   // 源端口
+	binary.BigEndian.PutUint16(packetData[tcpStart+2:tcpStart+4], dstPort) // 目标端口
+	binary.BigEndian.PutUint32(packetData[tcpStart+4:tcpStart+8], seqNum)  // 序列号
+	binary.BigEndian.PutUint32(packetData[tcpStart+8:tcpStart+12], ackNum) // 确认号
+	packetData[tcpStart+12] = 0x50                                         // 数据偏移 (20字节)
+	packetData[tcpStart+13] = flags                                        // 标志位
+	binary.BigEndian.PutUint16(packetData[tcpStart+14:tcpStart+16], 65535) // 窗口大小
+	binary.BigEndian.PutUint16(packetData[tcpStart+16:tcpStart+18], 0)     // 校验和(稍后计算)
+	binary.BigEndian.PutUint16(packetData[tcpStart+18:tcpStart+20], 0)     // 紧急指针
 
 	// 复制数据
 	if len(data) > 0 {
-		copy(rawData[tcpStart+20:tcpStart+20+len(data)], data)
+		copy(packetData[tcpStart+20:tcpStart+20+len(data)], data)
 	}
 
 	// 计算IP头校验和
-	rawData[ipStart+10] = 0
-	rawData[ipStart+11] = 0
-	ipChecksum := calcIPChecksum(rawData[ipStart : ipStart+20])
-	binary.BigEndian.PutUint16(rawData[ipStart+10:ipStart+12], ipChecksum)
+	packetData[ipStart+10] = 0
+	packetData[ipStart+11] = 0
+	ipChecksum := calcIPChecksum(packetData[ipStart : ipStart+20])
+	binary.BigEndian.PutUint16(packetData[ipStart+10:ipStart+12], ipChecksum)
 
-	// 计算TCP校验和 (简化处理，设为0)
-	binary.BigEndian.PutUint16(rawData[tcpStart+16:tcpStart+18], 0)
+	// 计算TCP校验和
+	binary.BigEndian.PutUint16(packetData[tcpStart+16:tcpStart+18], 0) // 先清零校验和字段
+	tcpLen := 20 + len(data)
+	tcpChecksum := calcTCPChecksum(srcIP, dstIP, packetData[tcpStart:tcpStart+tcpLen])
+	binary.BigEndian.PutUint16(packetData[tcpStart+16:tcpStart+18], tcpChecksum)
 
 	// 发送数据包
-	return SendPacket(pkt)
+	err := SendRawBytes(packetData)
+
+	// 只有使用了池切片的情况下才归还，且归还时恢复原始长度
+	if usePoolSlice {
+		// 将切片长度恢复为原始容量再归还给池
+		packetPool.Put(pooledSlice[:cap(pooledSlice)])
+	}
+
+	return err
 }
 
 // calcIPChecksum 计算IP头校验和
@@ -385,6 +405,42 @@ func calcIPChecksum(data []byte) uint16 {
 	for (sum >> 16) > 0 {
 		sum = (sum & 0xFFFF) + (sum >> 16)
 	}
+	return ^uint16(sum)
+}
+
+// calcTCPChecksum 计算TCP校验和
+func calcTCPChecksum(srcIP, dstIP net.IP, tcpData []byte) uint16 {
+	// TCP伪头部：源IP(4) + 目标IP(4) + 协议(1) + TCP长度(2) = 12字节
+	pseudoHeader := make([]byte, 12)
+	copy(pseudoHeader[0:4], srcIP.To4())
+	copy(pseudoHeader[4:8], dstIP.To4())
+	pseudoHeader[8] = 0 // 填充
+	pseudoHeader[9] = 6 // TCP协议号
+	binary.BigEndian.PutUint16(pseudoHeader[10:12], uint16(len(tcpData)))
+
+	// 计算校验和
+	sum := uint32(0)
+
+	// 伪头部校验和
+	for i := 0; i < len(pseudoHeader); i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(pseudoHeader[i : i+2]))
+	}
+
+	// TCP头和数据校验和
+	for i := 0; i < len(tcpData)-1; i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(tcpData[i : i+2]))
+	}
+
+	// 如果TCP数据长度是奇数，处理最后一个字节
+	if len(tcpData)%2 == 1 {
+		sum += uint32(tcpData[len(tcpData)-1]) << 8
+	}
+
+	// 折叠进位
+	for (sum >> 16) > 0 {
+		sum = (sum & 0xFFFF) + (sum >> 16)
+	}
+
 	return ^uint16(sum)
 }
 
