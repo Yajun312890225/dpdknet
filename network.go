@@ -142,7 +142,7 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 	case 17: // UDP
 		handleUDP(data, ipHeaderStart, headerLength, srcIP, dstIP)
 	case 6: // TCP
-		HandleTCPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
+	// HandleTCPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
 	// case 1: // ICMP - 暂时禁用
 	//	HandleICMPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
 	default:
