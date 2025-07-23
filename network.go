@@ -207,33 +207,13 @@ func handleUDP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP
 func globalSendGenerator(pkt *packet.Packet, ctx flow.UserContext) {
 	select {
 	case sendPkt := <-globalSendCh:
-		// 获取要发送的数据包的原始字节
-		sendData := sendPkt.GetRawPacketBytes()
-		if len(sendData) == 0 {
-			log.Printf("[ERROR] Send packet has no data")
-			packet.InitEmptyPacket(pkt, 0)
-			return
-		}
-
-		// 使用高性能的 GeneratePacketFromByte 直接在提供的 pkt 中生成
-		// 这避免了低效的 NewPacket() 调用
-		if !packet.GeneratePacketFromByte(pkt, sendData) {
-			log.Printf("[ERROR] Failed to generate packet from bytes")
-			packet.InitEmptyPacket(pkt, 0)
-			return
-		}
-
-		// 只在队列积压严重时才记录警告
-		queueLen := len(globalSendCh)
-		if queueLen > 10000 {
-			log.Printf("[WARNING] High packet send queue: %d", queueLen)
-		}
-
-		return
+		packet.GeneratePacketFromByte(pkt, sendPkt.GetRawPacketBytes())
+		// DPDK 包通过引用计数自动管理，不需要手动释放
+	case sendBytes := <-globalBytesCh:
+		packet.GeneratePacketFromByte(pkt, sendBytes)
+		packetPool.Put(sendBytes) // 确保用完后归还给池子
 	default:
-		// 没有数据包要发送，生成一个空包
 		packet.InitEmptyPacket(pkt, 0)
-		return
 	}
 }
 
@@ -263,20 +243,11 @@ func SendRawBytes(data []byte) error {
 		return fmt.Errorf("cannot send empty data")
 	}
 
-	// 检查当前队列状态
-	queueLen := len(globalBytesCh)
-	if queueLen > 32000 { // 如果队列使用超过50%，记录警告
-		log.Printf("[WARNING] Byte send queue is %d%% full (%d/65536)",
-			(queueLen*100)/65536, queueLen)
-	}
 
 	// 直接非阻塞发送，如果失败就立即报错，不重试
 	select {
 	case globalBytesCh <- data:
-		// 成功发送，偶尔记录统计信息
-		if queueLen%1000 == 0 && queueLen > 0 {
-			log.Printf("[DEBUG] Byte queue length: %d", queueLen)
-		}
+		
 		return nil
 	default:
 		// 队列满时立即失败，不重试（避免阻塞）

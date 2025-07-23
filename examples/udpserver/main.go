@@ -69,8 +69,8 @@ func main() {
 			}
 
 			data := buffer[:n]
-			log.Printf("[INFO] Received %d bytes from %s: %s",
-				n, clientAddr.String(), string(data))
+			// log.Printf("[INFO] Received %d bytes from %s: %s",
+			// n, clientAddr.String(), string(data))
 
 			// 处理数据包
 			handleUDPPacket(conn, clientAddr, data)
@@ -80,6 +80,11 @@ func main() {
 	// 等待退出信号
 	<-sigCh
 	log.Printf("[INFO] Received shutdown signal, closing server...")
+
+	// 注意：DPDK资源会通过dpdknet包的自动清理机制释放
+	// 如需禁用自动清理，可调用 dpdknet.EnableAutoCleanup(false)
+
+	log.Printf("[INFO] Server shutdown completed")
 }
 
 func handleUDPPacket(conn *dpdknet.UDPConn, clientAddr *dpdknet.UDPAddr, data []byte) {
@@ -105,10 +110,10 @@ func handleUDPPacket(conn *dpdknet.UDPConn, clientAddr *dpdknet.UDPAddr, data []
 		return
 	}
 
-	log.Printf("[INFO] Sent response to %s: %s", clientAddr.String(), response)
+	// log.Printf("[INFO] Sent response to %s: %s", clientAddr.String(), response)
 
 	// 统计信息
-	logPacketStats(clientAddr, len(data), len(response))
+	// logPacketStats(clientAddr, len(data), len(response))
 }
 
 func logPacketStats(clientAddr *dpdknet.UDPAddr, receivedBytes, sentBytes int) {

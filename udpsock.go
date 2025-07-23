@@ -8,9 +8,16 @@ import (
 	"net"
 	"sync"
 	"time"
-
-	"github.com/Yajun312890225/nff-go/packet"
 )
+
+// 数据包切片池，用于减少内存分配和GC压力
+var packetPool = sync.Pool{
+	New: func() interface{} {
+		// 预分配一个较大的切片，可以容纳大部分数据包
+		// 以太网最大帧长1518字节，加上一些余量分配2048字节
+		return make([]byte, 2048)
+	},
+}
 
 type UDPConn struct {
 	localAddr    *UDPAddr
@@ -145,19 +152,25 @@ func (c *UDPConn) WriteToUDP(buf []byte, addr *UDPAddr) (int, error) {
 
 // writeUDPWithMAC 使用指定的目标MAC地址写入UDP包
 func (c *UDPConn) writeUDPWithMAC(buf []byte, addr *UDPAddr, dstMAC [6]uint8) (int, error) {
-	// // 获取学习到的本地真实MAC地址
-	// c.mu.Lock()
-	// localMAC := c.localMAC
-	// c.mu.Unlock()
 
-	// // 如果还没有学习到本地MAC，使用默认MAC
-	// if localMAC == [6]uint8{} {
 	localMAC = GetLocalMAC()
-	// }
 
-	// 构建完整的UDP包字节数组，避免使用低效的 packet.NewPacket()
+	// 构建完整的UDP包字节数组，使用切片池避免频繁内存分配
 	totalLen := 14 + 20 + 8 + len(buf) // Ethernet + IP + UDP + payload
-	packetData := make([]byte, totalLen)
+
+	// 从切片池获取缓冲区
+	pooledSlice := packetPool.Get().([]byte)
+
+	// 如果池中的切片不够大，则创建新的切片
+	var packetData []byte
+	if len(pooledSlice) >= totalLen {
+		packetData = pooledSlice[:totalLen] // 使用池中的切片，调整长度
+	} else {
+		// 池中切片太小，创建新的切片
+		packetData = make([]byte, totalLen)
+		log.Printf("[DEBUG] Pool slice too small (%d < %d), allocating new slice",
+			len(pooledSlice), totalLen)
+	}
 
 	// 构建以太网头 (14字节)
 	copy(packetData[0:6], dstMAC[:])    // 目标MAC
@@ -213,29 +226,8 @@ func (c *UDPConn) writeUDPWithMAC(buf []byte, addr *UDPAddr, dstMAC [6]uint8) (i
 	// 计算UDP校验和（简化为0，很多实现都这样做）
 	binary.BigEndian.PutUint16(packetData[udpStart+6:], 0)
 
-	// 验证数据包内容（偶尔记录）
-	if len(buf)%100 == 0 { // 只记录每100个包中的某些包
-		log.Printf("[DEBUG] Packet: expected=%d bytes, actual=%d bytes, payload=%d",
-			totalLen, len(packetData), len(buf))
-	}
-
-	// 回退到使用 NewPacket，但尽量优化使用方式
-	tempPkt, err := packet.NewPacket()
-	if err != nil {
-		log.Printf("[ERROR] Failed to create temp packet: %v", err)
-		return 0, err
-	}
-
-	// 使用 GeneratePacketFromByte 填充包
-	if !packet.GeneratePacketFromByte(tempPkt, packetData) {
-		log.Printf("[ERROR] Failed to generate packet from bytes")
-		return 0, errors.New("failed to generate packet")
-	}
-
-	// 发送数据包
-	if err := SendPacket(tempPkt); err != nil {
-		log.Printf("[ERROR] Failed to send packet to %s:%d: %v", addr.IP.String(), addr.Port, err)
-		return 0, err
+	if err := SendRawBytes(packetData); err != nil {
+		packetPool.Put(pooledSlice) // 归还池中的切片
 	}
 
 	return len(buf), nil
