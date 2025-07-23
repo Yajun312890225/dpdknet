@@ -23,12 +23,12 @@ func Init() error {
 	log.Printf("[DEBUG] DPDK Init() called")
 	initOnce.Do(func() {
 		config := flow.Config{
-			CPUList:               "0-7",  // 8核都利用
+			// CPUList:               "0-7",  // 8核都利用
 			MbufNumber:            131072, // 提高 mbuf 数量
 			MbufCacheSize:         512,    // 提高 per-core 缓存
 			RingSize:              4096,   // 加大环形队列
-			TXQueuesNumberPerPort: 4,      // 使用4个 TX 队列
-			SendCPUCoresPerPort:   4,      // 4核负责 TX
+			TXQueuesNumberPerPort: 2,      // 使用4个 TX 队列
+			SendCPUCoresPerPort:   2,      // 4核负责 TX
 			MaxRecv:               128,    // 提高批量收包
 			SchedulerInterval:     100,
 			HWTXChecksum:          true,
