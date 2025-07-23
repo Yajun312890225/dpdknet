@@ -10,3 +10,4 @@ require (
 )
 
 replace github.com/Yajun312890225/dpdknet => ../../
+replace github.com/Yajun312890225/nff-go => ../../../nff-go
