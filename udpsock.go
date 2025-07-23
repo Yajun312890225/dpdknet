@@ -159,18 +159,7 @@ func (c *UDPConn) writeUDPWithMAC(buf []byte, addr *UDPAddr, dstMAC [6]uint8) (i
 	totalLen := 14 + 20 + 8 + len(buf) // Ethernet + IP + UDP + payload
 
 	// 从切片池获取缓冲区
-	pooledSlice := packetPool.Get().([]byte)
-
-	// 如果池中的切片不够大，则创建新的切片
-	var packetData []byte
-	if len(pooledSlice) >= totalLen {
-		packetData = pooledSlice[:totalLen] // 使用池中的切片，调整长度
-	} else {
-		// 池中切片太小，创建新的切片
-		packetData = make([]byte, totalLen)
-		log.Printf("[DEBUG] Pool slice too small (%d < %d), allocating new slice",
-			len(pooledSlice), totalLen)
-	}
+	packetData := packetPool.Get().([]byte)
 
 	// 构建以太网头 (14字节)
 	copy(packetData[0:6], dstMAC[:])    // 目标MAC
@@ -226,8 +215,13 @@ func (c *UDPConn) writeUDPWithMAC(buf []byte, addr *UDPAddr, dstMAC [6]uint8) (i
 	// 计算UDP校验和（简化为0，很多实现都这样做）
 	binary.BigEndian.PutUint16(packetData[udpStart+6:], 0)
 
-	if err := SendRawBytes(packetData); err != nil {
-		packetPool.Put(pooledSlice) // 归还池中的切片
+	// 发送数据包
+	err := SendRawBytes(packetData[:totalLen])
+
+	if err != nil {
+		packetPool.Put(packetData[:cap(packetData)])
+		log.Printf("[ERROR] Failed to send UDP packet: %v", err)
+		return 0, err
 	}
 
 	return len(buf), nil

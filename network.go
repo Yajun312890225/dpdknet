@@ -211,7 +211,7 @@ func globalSendGenerator(pkt *packet.Packet, ctx flow.UserContext) {
 		// DPDK 包通过引用计数自动管理，不需要手动释放
 	case sendBytes := <-globalBytesCh:
 		packet.GeneratePacketFromByte(pkt, sendBytes)
-		packetPool.Put(sendBytes) // 确保用完后归还给池子
+		packetPool.Put(sendBytes[:cap(sendBytes)])
 	default:
 		packet.InitEmptyPacket(pkt, 0)
 	}
@@ -243,11 +243,10 @@ func SendRawBytes(data []byte) error {
 		return fmt.Errorf("cannot send empty data")
 	}
 
-
 	// 直接非阻塞发送，如果失败就立即报错，不重试
 	select {
 	case globalBytesCh <- data:
-		
+
 		return nil
 	default:
 		// 队列满时立即失败，不重试（避免阻塞）

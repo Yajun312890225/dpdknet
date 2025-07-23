@@ -29,11 +29,12 @@ func Init() error {
 			RingSize:              4096,   // 加大环形队列
 			TXQueuesNumberPerPort: 2,      // 使用4个 TX 队列
 			SendCPUCoresPerPort:   2,      // 4核负责 TX
-			MaxRecv:               128,    // 提高批量收包
+			MaxRecv:               64,     // 提高批量收包
 			SchedulerInterval:     100,
 			HWTXChecksum:          true,
 			RestrictedCloning:     true,
-			LogType:               common.Debug,
+			LogType:               common.No,
+			NoSetSIGINTHandler:    true, // 禁用 SIGINT 处理
 		}
 		log.Printf("[DEBUG] Calling flow.SystemInit with config: %+v", config)
 		initErr = flow.SystemInit(&config)

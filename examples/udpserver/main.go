@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Yajun312890225/dpdknet"
+	"github.com/Yajun312890225/nff-go/flow"
 )
 
 func main() {
@@ -80,10 +81,9 @@ func main() {
 	// 等待退出信号
 	<-sigCh
 	log.Printf("[INFO] Received shutdown signal, closing server...")
-
 	// 注意：DPDK资源会通过dpdknet包的自动清理机制释放
 	// 如需禁用自动清理，可调用 dpdknet.EnableAutoCleanup(false)
-
+	flow.SystemStop()
 	log.Printf("[INFO] Server shutdown completed")
 }
 
