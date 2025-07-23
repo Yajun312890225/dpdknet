@@ -229,7 +229,7 @@ func (c *TCPConn) Write(data []byte) (int, error) {
 	// 更新序列号
 	c.seqNum += uint32(len(data))
 
-	log.Printf("[DEBUG] TCP Write: %d bytes to %s", len(data), c.remoteAddr.String())
+	log.Printf("[DEBUG] TCP Write: %d bytes to %s (seq=%d, ack=%d)", len(data), c.remoteAddr.String(), c.seqNum-uint32(len(data)), c.ackNum)
 	return len(data), nil
 }
 
@@ -336,8 +336,11 @@ func init() {
 				}
 				// 10分钟无活跃自动清理
 				if now.Sub(last) > 10*time.Minute {
-					conn.closed = true
-					close(conn.dataCh)
+					// 检查连接是否已经关闭，避免重复关闭
+					if !conn.closed {
+						conn.closed = true
+						close(conn.dataCh)
+					}
 					delete(tcpConnTable, key)
 					delete(tcpConnLastActive, key)
 					log.Printf("[INFO] TCP connection %s idle timeout, removed", key)
@@ -424,8 +427,9 @@ func processTCPPacketForListener(listener *TCPListener, data []byte, tcpStart in
 			expectedAck := conn.seqNum + 1
 			if ackNum == expectedAck {
 				conn.state = TCPStateEstablished
-				conn.seqNum++ // 增加我们的序列号
-				log.Printf("[DEBUG] TCP connection established for %s (ack=%d, expected=%d)", connKey, ackNum, expectedAck)
+				conn.seqNum++        // 增加我们的序列号
+				conn.ackNum = seqNum // 更新我们的ACK号为客户端的序列号
+				log.Printf("[DEBUG] TCP connection established for %s (ack=%d, expected=%d, our_ack=%d)", connKey, ackNum, expectedAck, conn.ackNum)
 
 				// 三次握手完成，现在将连接放入accept队列
 				select {
@@ -449,12 +453,14 @@ func processTCPPacketForListener(listener *TCPListener, data []byte, tcpStart in
 		dataStart := tcpStart + tcpHeaderLen
 		payloadLen := len(data) - dataStart
 
-		if ok && payloadLen > 0 {
+		if ok && conn.state == TCPStateEstablished && payloadLen > 0 {
 			log.Printf("[DEBUG] Received %d bytes of TCP data", payloadLen)
+			// 更新我们的ACK号
+			conn.ackNum = seqNum + uint32(payloadLen)
 			// 投递数据到连接
 			conn.dataCh <- data[dataStart:]
 			// 发送ACK确认
-			sendTCPAck(srcIP, srcPort, dstIP, dstPort, ackNum, seqNum+uint32(payloadLen))
+			sendTCPAck(srcIP, srcPort, dstIP, dstPort, conn.seqNum, conn.ackNum)
 			// 活跃时间更新
 			tcpConnTableMutex.Lock()
 			tcpConnLastActive[connKey] = now
@@ -467,8 +473,11 @@ func processTCPPacketForListener(listener *TCPListener, data []byte, tcpStart in
 		tcpConnTableMutex.Lock()
 		conn, ok := tcpConnTable[connKey]
 		if ok {
-			conn.closed = true
-			close(conn.dataCh)
+			// 检查连接是否已经关闭，避免重复关闭
+			if !conn.closed {
+				conn.closed = true
+				close(conn.dataCh)
+			}
 			delete(tcpConnTable, connKey)
 			delete(tcpConnLastActive, connKey)
 			log.Printf("[INFO] TCP connection %s closed and removed", connKey)
