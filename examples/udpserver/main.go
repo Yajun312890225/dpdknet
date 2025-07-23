@@ -21,8 +21,18 @@ func main() {
 		port = os.Args[1]
 	}
 
+	// 从环境变量获取服务器IP，如果没有设置则使用默认值
+	serverIP := os.Getenv("DPDK_SERVER_IP")
+	if serverIP == "" {
+		serverIP = "192.168.66.57" // 默认IP
+		log.Printf("[WARNING] DPDK_SERVER_IP not set, using default: %s", serverIP)
+	} else {
+		log.Printf("[INFO] Using server IP from environment: %s", serverIP)
+	}
+
 	// 解析监听地址
-	addr, err := dpdknet.ResolveUDPAddr("udp", "192.168.66.53:"+port)
+	listenAddr := serverIP + ":" + port
+	addr, err := dpdknet.ResolveUDPAddr("udp", listenAddr)
 	if err != nil {
 		log.Fatalf("[ERROR] Failed to resolve address: %v", err)
 	}
