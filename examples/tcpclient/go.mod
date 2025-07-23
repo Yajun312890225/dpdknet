@@ -1,6 +1,6 @@
 module tcpclient
 
-go 1.21
+go 1.19
 
 require github.com/Yajun312890225/dpdknet v0.0.0
 
