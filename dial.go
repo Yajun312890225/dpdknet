@@ -28,8 +28,75 @@ func Dial(network, address string) (net.Conn, error) {
 
 // DialTimeout acts like Dial but takes a timeout.
 func DialTimeout(network, address string, timeout time.Duration) (net.Conn, error) {
-	// TODO: Implement timeout logic
-	return Dial(network, address)
+	switch network {
+	case "tcp", "tcp4", "tcp6":
+		addr, err := ResolveTCPAddr(network, address)
+		if err != nil {
+			return nil, err
+		}
+		return DialTCPTimeout(network, nil, addr, timeout)
+	case "udp", "udp4", "udp6":
+		// UDP是无连接的，超时对建立连接没有意义，直接调用Dial
+		return Dial(network, address)
+	default:
+		return nil, errors.New("unsupported network type: " + network)
+	}
+}
+
+// DialTCPTimeout 创建带超时的TCP连接
+func DialTCPTimeout(network string, laddr, raddr *TCPAddr, timeout time.Duration) (*TCPConn, error) {
+	// 确保全局网络系统已初始化
+	if err := EnsureGlobalNetworkInit(); err != nil {
+		return nil, err
+	}
+
+	if raddr == nil {
+		return nil, errors.New("remote address cannot be nil")
+	}
+
+	// 转换为标准net.TCPAddr
+	var localAddr *net.TCPAddr
+	if laddr != nil {
+		localAddr = &net.TCPAddr{
+			IP:   laddr.IP,
+			Port: laddr.Port,
+			Zone: laddr.Zone,
+		}
+	}
+
+	remoteAddr := &net.TCPAddr{
+		IP:   raddr.IP,
+		Port: raddr.Port,
+		Zone: raddr.Zone,
+	}
+
+	// 通过 gVisor netstack 创建带超时的TCP连接
+	gvisorConn, err := CreateGVisorTCPConnWithTimeout(localAddr, remoteAddr, timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	// 创建TCPConn包装器
+	tcpConn := &TCPConn{
+		localAddr:  laddr,
+		remoteAddr: raddr,
+		gvisorConn: gvisorConn,
+	}
+
+	// 如果本地地址为空，尝试从连接中获取
+	if tcpConn.localAddr == nil {
+		if localAddrFromConn := gvisorConn.LocalAddr(); localAddrFromConn != nil {
+			if tcpAddr, ok := localAddrFromConn.(*net.TCPAddr); ok {
+				tcpConn.localAddr = &TCPAddr{
+					IP:   tcpAddr.IP,
+					Port: tcpAddr.Port,
+					Zone: tcpAddr.Zone,
+				}
+			}
+		}
+	}
+
+	return tcpConn, nil
 }
 
 // DialUDP acts like Dial for UDP networks.

@@ -131,9 +131,53 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 		return nil, err
 	}
 
-	// 强制使用 gVisor，暂时不支持DialTCP（通常用于客户端连接）
-	// 大多数服务器应用只需要Listen功能
-	return nil, fmt.Errorf("DialTCP not implemented with gVisor yet, use standard net.Dial instead")
+	if raddr == nil {
+		return nil, fmt.Errorf("remote address cannot be nil")
+	}
+
+	// 转换为标准net.TCPAddr
+	var localAddr *net.TCPAddr
+	if laddr != nil {
+		localAddr = &net.TCPAddr{
+			IP:   laddr.IP,
+			Port: laddr.Port,
+			Zone: laddr.Zone,
+		}
+	}
+
+	remoteAddr := &net.TCPAddr{
+		IP:   raddr.IP,
+		Port: raddr.Port,
+		Zone: raddr.Zone,
+	}
+
+	// 通过 gVisor netstack 创建TCP连接
+	gvisorConn, err := CreateGVisorTCPConn(localAddr, remoteAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TCP connection: %v", err)
+	}
+
+	// 创建TCPConn包装器
+	tcpConn := &TCPConn{
+		localAddr:  laddr,
+		remoteAddr: raddr,
+		gvisorConn: gvisorConn,
+	}
+
+	// 如果本地地址为空，尝试从连接中获取
+	if tcpConn.localAddr == nil {
+		if localAddrFromConn := gvisorConn.LocalAddr(); localAddrFromConn != nil {
+			if tcpAddr, ok := localAddrFromConn.(*net.TCPAddr); ok {
+				tcpConn.localAddr = &TCPAddr{
+					IP:   tcpAddr.IP,
+					Port: tcpAddr.Port,
+					Zone: tcpAddr.Zone,
+				}
+			}
+		}
+	}
+
+	return tcpConn, nil
 }
 
 func (c *TCPConn) Read(buf []byte) (int, error) {

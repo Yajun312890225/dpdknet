@@ -370,6 +370,48 @@ func (gvs *GVisorNetstack) CreateUDPConn(port uint16) (net.PacketConn, error) {
 	return conn, nil
 }
 
+// CreateTCPConn 创建 TCP 客户端连接
+func (gvs *GVisorNetstack) CreateTCPConn(localAddr, remoteAddr *net.TCPAddr) (net.Conn, error) {
+	remoteFullAddr := tcpip.FullAddress{
+		NIC:  defaultNICID,
+		Addr: tcpip.AddrFromSlice(remoteAddr.IP.To4()),
+		Port: uint16(remoteAddr.Port),
+	}
+
+	conn, err := gonet.DialTCP(gvs.stack, remoteFullAddr, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TCP connection: %v", err)
+	}
+
+	gvs.stats.TCPConnections++
+	gvs.stats.ActiveConnections++
+	return conn, nil
+}
+
+// CreateTCPConnWithTimeout 创建带超时的 TCP 客户端连接
+func (gvs *GVisorNetstack) CreateTCPConnWithTimeout(localAddr, remoteAddr *net.TCPAddr, timeout time.Duration) (net.Conn, error) {
+	// 创建一个通道来接收连接结果
+	resultCh := make(chan struct {
+		conn net.Conn
+		err  error
+	}, 1)
+
+	go func() {
+		conn, err := gvs.CreateTCPConn(localAddr, remoteAddr)
+		resultCh <- struct {
+			conn net.Conn
+			err  error
+		}{conn, err}
+	}()
+
+	select {
+	case result := <-resultCh:
+		return result.conn, result.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("connection timeout after %v", timeout)
+	}
+}
+
 // GetStats 获取统计信息
 func (gvs *GVisorNetstack) GetStats() GVisorStats {
 	gvs.mu.RLock()
@@ -422,6 +464,24 @@ func CreateGVisorUDPConn(port uint16) (net.PacketConn, error) {
 		return nil, fmt.Errorf("gVisor netstack not initialized")
 	}
 	return gvs.CreateUDPConn(port)
+}
+
+// CreateGVisorTCPConn 通过 gVisor netstack 创建 TCP 客户端连接
+func CreateGVisorTCPConn(localAddr, remoteAddr *net.TCPAddr) (net.Conn, error) {
+	gvs := GetGVisorNetstack()
+	if gvs == nil {
+		return nil, fmt.Errorf("gVisor netstack not initialized")
+	}
+	return gvs.CreateTCPConn(localAddr, remoteAddr)
+}
+
+// CreateGVisorTCPConnWithTimeout 通过 gVisor netstack 创建带超时的 TCP 客户端连接
+func CreateGVisorTCPConnWithTimeout(localAddr, remoteAddr *net.TCPAddr, timeout time.Duration) (net.Conn, error) {
+	gvs := GetGVisorNetstack()
+	if gvs == nil {
+		return nil, fmt.Errorf("gVisor netstack not initialized")
+	}
+	return gvs.CreateTCPConnWithTimeout(localAddr, remoteAddr, timeout)
 }
 
 // ProcessDPDKPacket 处理来自 DPDK 的数据包（全局入口）
