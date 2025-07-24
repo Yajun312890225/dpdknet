@@ -10,13 +10,12 @@ import (
 )
 
 var (
-	initOnce           sync.Once
-	startOnce          sync.Once
-	cleanupOnce        sync.Once
-	initErr            error
-	startErr           error
-	isStarted          bool
-	autoCleanupEnabled bool = true // 默认启用自动清理
+	initOnce    sync.Once
+	startOnce   sync.Once
+	cleanupOnce sync.Once
+	initErr     error
+	startErr    error
+	isStarted   bool
 )
 
 func Init() error {
