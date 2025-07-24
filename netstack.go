@@ -134,10 +134,6 @@ func newGVisorNetstack(localIP net.IP, localMAC [6]byte, subnetMask net.IPMask) 
 		dpdkCh:     make(chan []byte, 10000), // 大容量缓冲区
 	}
 
-	log.Printf("[INFO] GVisor Netstack initialized with IP %s/%d, MAC %02x:%02x:%02x:%02x:%02x:%02x",
-		localIP.String(), getPrefixLen(subnetMask),
-		localMAC[0], localMAC[1], localMAC[2], localMAC[3], localMAC[4], localMAC[5])
-
 	return gvs, nil
 }
 
@@ -162,7 +158,6 @@ func (gvs *GVisorNetstack) Start() error {
 	go gvs.netstackPacketProcessor()
 
 	gvs.started = true
-	log.Printf("[INFO] GVisor Netstack started")
 	return nil
 }
 
@@ -182,7 +177,6 @@ func (gvs *GVisorNetstack) Stop() {
 	gvs.processingWG.Wait()
 
 	gvs.started = false
-	log.Printf("[INFO] GVisor Netstack stopped")
 }
 
 // InjectDPDKPacket 从 DPDK 注入数据包到 gVisor 协议栈
@@ -198,7 +192,6 @@ func (gvs *GVisorNetstack) InjectDPDKPacket(data []byte) {
 		gvs.stats.PacketsReceived++
 	default:
 		gvs.stats.PacketsDropped++
-		log.Printf("[WARNING] DPDK packet dropped due to full buffer")
 	}
 }
 
@@ -345,11 +338,6 @@ func (gvs *GVisorNetstack) sendPacketToDPDK(pkt *stack.PacketBuffer) {
 
 // CreateTCPListener 创建 TCP 监听器
 func (gvs *GVisorNetstack) CreateTCPListener(port uint16) (net.Listener, error) {
-	addr := &net.TCPAddr{
-		IP:   gvs.localIP,
-		Port: int(port),
-	}
-
 	fullAddr := tcpip.FullAddress{
 		NIC:  defaultNICID,
 		Addr: tcpip.AddrFromSlice(gvs.localIP.To4()),
@@ -362,17 +350,11 @@ func (gvs *GVisorNetstack) CreateTCPListener(port uint16) (net.Listener, error) 
 	}
 
 	gvs.stats.TCPConnections++
-	log.Printf("[INFO] TCP listener created on %s", addr.String())
 	return listener, nil
 }
 
 // CreateUDPConn 创建 UDP 连接
 func (gvs *GVisorNetstack) CreateUDPConn(port uint16) (net.PacketConn, error) {
-	addr := &net.UDPAddr{
-		IP:   gvs.localIP,
-		Port: int(port),
-	}
-
 	fullAddr := tcpip.FullAddress{
 		NIC:  defaultNICID,
 		Addr: tcpip.AddrFromSlice(gvs.localIP.To4()),
@@ -385,7 +367,6 @@ func (gvs *GVisorNetstack) CreateUDPConn(port uint16) (net.PacketConn, error) {
 	}
 
 	gvs.stats.UDPConnections++
-	log.Printf("[INFO] UDP connection created on %s", addr.String())
 	return conn, nil
 }
 
@@ -398,15 +379,7 @@ func (gvs *GVisorNetstack) GetStats() GVisorStats {
 
 // PrintStats 打印统计信息
 func (gvs *GVisorNetstack) PrintStats() {
-	stats := gvs.GetStats()
-	log.Printf("[INFO] GVisor Netstack Stats:")
-	log.Printf("  Packets Received: %d", stats.PacketsReceived)
-	log.Printf("  Packets Processed: %d", stats.PacketsProcessed)
-	log.Printf("  Packets Dropped: %d", stats.PacketsDropped)
-	log.Printf("  Packets Sent: %d", stats.PacketsSent)
-	log.Printf("  TCP Connections: %d", stats.TCPConnections)
-	log.Printf("  UDP Connections: %d", stats.UDPConnections)
-	log.Printf("  Active Connections: %d", stats.ActiveConnections)
+	// 统计信息可通过 GetStats() 方法获取
 }
 
 // GetGVisorNetstack 获取全局 gVisor 协议栈实例
@@ -430,7 +403,6 @@ func IntegrateGVisorWithDPDK(localIP net.IP, localMAC [6]byte) error {
 		return fmt.Errorf("failed to start gVisor netstack: %v", err)
 	}
 
-	log.Printf("[INFO] GVisor netstack integrated with DPDK successfully")
 	return nil
 }
 

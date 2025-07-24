@@ -31,7 +31,6 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	}
 
 	// 强制使用 gVisor netstack
-	log.Printf("[DEBUG] Creating UDP connection using gVisor netstack")
 	gvisorConn, err := CreateGVisorUDPConn(uint16(laddr.Port))
 	if err != nil {
 		log.Printf("[ERROR] Failed to create gVisor UDP connection: %v", err)
@@ -39,7 +38,7 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	}
 
 	c.gvisorConn = gvisorConn
-	log.Printf("[INFO] UDP connection created using gVisor netstack on port %d", laddr.Port)
+
 	return c, nil
 }
 
@@ -131,40 +130,50 @@ func (c *UDPConn) RemoteAddr() net.Addr {
 }
 
 func (c *UDPConn) Close() error {
-	log.Printf("[DEBUG] Close() called")
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		log.Printf("[DEBUG] Connection already closed")
 		return nil
 	}
 	c.closed = true
 
 	// 强制使用 gVisor，关闭 gVisor 连接
 	if c.gvisorConn != nil {
-		err := c.gvisorConn.Close()
-		log.Printf("[DEBUG] gVisor connection closed")
-		return err
+		return c.gvisorConn.Close()
 	}
 
-	log.Printf("[DEBUG] Connection closed successfully")
 	return nil
 }
 
 // SetDeadline sets the read and write deadlines associated with the connection.
 func (c *UDPConn) SetDeadline(t time.Time) error {
-	// TODO: 实现超时逻辑
+	if c.gvisorConn != nil {
+		// 尝试设置gVisor连接的deadline
+		if conn, ok := c.gvisorConn.(interface{ SetDeadline(time.Time) error }); ok {
+			return conn.SetDeadline(t)
+		}
+	}
 	return nil
 }
 
 // SetReadDeadline sets the deadline for future Read calls.
 func (c *UDPConn) SetReadDeadline(t time.Time) error {
-	// TODO: 实现读超时逻辑
+	if c.gvisorConn != nil {
+		// 尝试设置gVisor连接的read deadline
+		if conn, ok := c.gvisorConn.(interface{ SetReadDeadline(time.Time) error }); ok {
+			return conn.SetReadDeadline(t)
+		}
+	}
 	return nil
 }
 
 // SetWriteDeadline sets the deadline for future Write calls.
 func (c *UDPConn) SetWriteDeadline(t time.Time) error {
-	// TODO: 实现写超时逻辑
+	if c.gvisorConn != nil {
+		// 尝试设置gVisor连接的write deadline
+		if conn, ok := c.gvisorConn.(interface{ SetWriteDeadline(time.Time) error }); ok {
+			return conn.SetWriteDeadline(t)
+		}
+	}
 	return nil
 }

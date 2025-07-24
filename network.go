@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 
 	"github.com/Yajun312890225/nff-go/flow"
@@ -34,6 +35,18 @@ func init() {
 	globalBytesCh = make(chan []byte, 65536)        // 高性能字节通道
 	// 设置默认 MAC 地址，稍后可以通过 DPDK 获取真实 MAC
 	localMAC = [6]uint8{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+}
+
+// getLocalIPFromEnv 从环境变量获取本地IP地址，如果没有设置则使用默认值
+func getLocalIPFromEnv() net.IP {
+	if ipStr := os.Getenv("DPDKNET_LOCAL_IP"); ipStr != "" {
+		if ip := net.ParseIP(ipStr); ip != nil {
+			return ip.To4()
+		}
+		log.Printf("[WARNING] Invalid IP address in DPDKNET_LOCAL_IP: %s, using default", ipStr)
+	}
+	// 默认IP地址
+	return net.IPv4(192, 168, 66, 57)
 }
 
 // EnsureGlobalNetworkInit 确保全局网络系统只初始化一次
@@ -106,7 +119,9 @@ func initializeGlobalNetwork() error {
 
 	// 初始化和启动 gVisor netstack
 	log.Printf("[DEBUG] Initializing gVisor netstack...")
-	localIP := net.IPv4(192, 168, 66, 57) // 默认IP，可以通过环境变量或配置文件设置
+
+	// 尝试从环境变量获取IP地址，如果没有设置则使用默认值
+	localIP := getLocalIPFromEnv()
 	if err := IntegrateGVisorWithDPDK(localIP, localMAC); err != nil {
 		log.Printf("[ERROR] Failed to integrate gVisor with DPDK: %v", err)
 		return err
