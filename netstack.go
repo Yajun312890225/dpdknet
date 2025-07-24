@@ -24,7 +24,7 @@ const (
 	defaultNICID = tcpip.NICID(1)
 )
 
-// GVisorNetstack gVisor 网络协议栈封装
+// GVisorNetstack gVisor 网络协议栈封装，实现 DPDK 链路层集成
 type GVisorNetstack struct {
 	stack   *stack.Stack
 	linkEP  *channel.Endpoint
@@ -44,6 +44,9 @@ type GVisorNetstack struct {
 	// DPDK 集成
 	dpdkCh       chan []byte
 	processingWG sync.WaitGroup
+
+	// 作为 DPDK 的链路层处理器
+	packetHandler func([]byte) error
 }
 
 // GVisorStats gVisor 协议栈统计信息
@@ -100,8 +103,11 @@ func newGVisorNetstack(localIP net.IP, localMAC [6]byte, subnetMask net.IPMask) 
 		return nil, fmt.Errorf("failed to add protocol address: %v", tcpErr)
 	}
 
-	// 设置默认路由
-	subnet, tcpErr := tcpip.NewSubnet(tcpip.AddrFromSlice(net.IPv4zero), tcpip.MaskFromBytes(net.IPv4Mask(0, 0, 0, 0)))
+	// 设置默认路由，确保地址和掩码长度一致
+	subnet, tcpErr := tcpip.NewSubnet(
+		tcpip.AddrFromSlice([]byte{0, 0, 0, 0}),
+		tcpip.MaskFromBytes([]byte{0, 0, 0, 0}),
+	)
 	if tcpErr != nil {
 		return nil, fmt.Errorf("failed to create subnet: %v", tcpErr)
 	}
@@ -181,6 +187,7 @@ func (gvs *GVisorNetstack) Stop() {
 
 // InjectDPDKPacket 从 DPDK 注入数据包到 gVisor 协议栈
 func (gvs *GVisorNetstack) InjectDPDKPacket(data []byte) {
+	log.Printf("[DEBUG] Injecting packet to gVisor netstack: %d bytes", len(data))
 	if !gvs.started {
 		gvs.stats.PacketsDropped++
 		return
@@ -318,7 +325,7 @@ func (gvs *GVisorNetstack) sendPacketToDPDK(pkt *stack.PacketBuffer) {
 	frame := make([]byte, totalSize)
 
 	// 以太网头部 - 这里需要根据具体的路由信息设置目标MAC
-	// 简化处理：使用广播地址
+	// 简化处理：使用广播地址，实际使用中应该通过ARP解析
 	copy(frame[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // 目标 MAC
 	copy(frame[6:12], gvs.localMAC[:])                           // 源 MAC
 	frame[12] = 0x08                                             // EtherType IPv4 高字节
@@ -444,4 +451,33 @@ func CreateGVisorUDPConn(port uint16) (net.PacketConn, error) {
 		return nil, fmt.Errorf("gVisor netstack not initialized")
 	}
 	return gvs.CreateUDPConn(port)
+}
+
+// ProcessDPDKPacket 处理来自 DPDK 的数据包（全局入口）
+func ProcessDPDKPacket(data []byte) error {
+	gvs := GetGVisorNetstack()
+	if gvs == nil {
+		return fmt.Errorf("gVisor netstack not initialized")
+	}
+
+	gvs.InjectDPDKPacket(data)
+	return nil
+}
+
+// GetNetworkStats 获取网络统计信息
+func GetNetworkStats() *GVisorStats {
+	gvs := GetGVisorNetstack()
+	if gvs == nil {
+		return nil
+	}
+
+	stats := gvs.GetStats()
+	return &stats
+}
+
+// SetPacketHandler 设置数据包处理器（可选，用于自定义处理）
+func (gvs *GVisorNetstack) SetPacketHandler(handler func([]byte) error) {
+	gvs.mu.Lock()
+	defer gvs.mu.Unlock()
+	gvs.packetHandler = handler
 }

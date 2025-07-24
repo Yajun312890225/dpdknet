@@ -1,7 +1,6 @@
 package dpdknet
 
 import (
-	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -107,7 +106,7 @@ func initializeGlobalNetwork() error {
 
 	// 初始化和启动 gVisor netstack
 	log.Printf("[DEBUG] Initializing gVisor netstack...")
-	localIP := net.IPv4(192, 168, 1, 100) // 默认IP，可以通过环境变量或配置文件设置
+	localIP := net.IPv4(192, 168, 66, 57) // 默认IP，可以通过环境变量或配置文件设置
 	if err := IntegrateGVisorWithDPDK(localIP, localMAC); err != nil {
 		log.Printf("[ERROR] Failed to integrate gVisor with DPDK: %v", err)
 		return err
@@ -138,86 +137,6 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 		return
 	}
 
-	// Fallback: 如果 gVisor netstack 未启用，使用原有处理方式
-	ipHeaderStart := 14
-	if len(data) < ipHeaderStart+20 {
-		return
-	}
-
-	// 解析IP协议类型
-	protocol := data[ipHeaderStart+9]
-	headerLength := int((data[ipHeaderStart] & 0x0F) * 4)
-
-	// 提取IP地址
-	dstIP := net.IPv4(data[ipHeaderStart+16], data[ipHeaderStart+17],
-		data[ipHeaderStart+18], data[ipHeaderStart+19])
-	srcIP := net.IPv4(data[ipHeaderStart+12], data[ipHeaderStart+13],
-		data[ipHeaderStart+14], data[ipHeaderStart+15])
-
-	// 只处理 UDP/TCP，ICMP 暂时禁用以避免影响 UDP 性能
-	switch protocol {
-	case 17: // UDP
-		handleUDP(data, ipHeaderStart, headerLength, srcIP, dstIP)
-	case 6: // TCP
-		HandleTCPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
-	// case 1: // ICMP - 暂时禁用
-	//	HandleICMPPacket(data, ipHeaderStart, headerLength, srcIP, dstIP)
-	default:
-		return
-	}
-}
-
-// handleUDP 处理UDP包
-func handleUDP(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP) {
-	udpStart := ipHeaderStart + headerLength
-	if len(data) < udpStart+8 {
-		log.Printf("[WARNING] UDP packet too short: %d bytes, need at least %d", len(data), udpStart+8)
-		return
-	}
-
-	// 解析UDP头
-	// srcPort := binary.BigEndian.Uint16(data[udpStart : udpStart+2])
-	dstPort := binary.BigEndian.Uint16(data[udpStart+2 : udpStart+4])
-	// udpLen := binary.BigEndian.Uint16(data[udpStart+4 : udpStart+6])
-
-	// 查找对应的UDP监听器
-	key := fmt.Sprintf("udp:%s:%d", dstIP.String(), dstPort)
-	udpListenersMutex.RLock()
-	conn, exists := udpListeners[key]
-	udpListenersMutex.RUnlock()
-
-	if !exists {
-		// 尝试通配符匹配 (0.0.0.0:port)
-		wildcardKey := fmt.Sprintf("udp:0.0.0.0:%d", dstPort)
-		udpListenersMutex.RLock()
-		conn, exists = udpListeners[wildcardKey]
-		udpListenersMutex.RUnlock()
-		if !exists {
-			return
-		}
-	}
-
-	// 学习并保存客户端的MAC地址，用于后续回复
-	clientKey := srcIP.String()
-	conn.mu.Lock()
-	srcMAC := [6]uint8{}
-	copy(srcMAC[:], data[6:12]) // 提取源MAC地址
-	conn.clientMACs[clientKey] = srcMAC
-
-	// 同时学习本地真实MAC地址（目标MAC）
-	// copy(conn.localMAC[:], data[0:6])
-	conn.mu.Unlock()
-
-	// 复制数据包并发送到对应的连接
-	buf := make([]byte, len(data))
-	copy(buf, data)
-
-	select {
-	case conn.recvCh <- buf:
-		// 正常投递不打印日志
-	default:
-		log.Printf("[WARNING] UDP listener buffer full, dropping packet")
-	}
 }
 
 // globalSendGenerator 全局发送生成器 - 简化为只处理包通道
@@ -228,7 +147,6 @@ func globalSendGenerator(pkt *packet.Packet, ctx flow.UserContext) {
 		// DPDK 包通过引用计数自动管理，不需要手动释放
 	case sendBytes := <-globalBytesCh:
 		packet.GeneratePacketFromByte(pkt, sendBytes)
-		packetPool.Put(sendBytes[:cap(sendBytes)])
 	default:
 		packet.InitEmptyPacket(pkt, 0)
 	}
@@ -326,142 +244,4 @@ func FindTCPListenerByKey(key string) *TCPListener {
 	defer tcpListenersMutex.RUnlock()
 
 	return tcpListeners[key]
-}
-
-// SendTCPPacket 发送TCP数据包
-func SendTCPPacket(srcIP, dstIP net.IP, srcPort, dstPort uint16, seqNum, ackNum uint32, flags uint8, data []byte) error {
-	// 构建以太网帧 + IP头 + TCP头 + 数据
-	totalLen := 14 + 20 + 20 + len(data) // 以太网头 + IP头 + TCP头 + 数据
-
-	// 从切片池获取缓冲区
-	pooledSlice := packetPool.Get().([]byte)
-	var packetData []byte
-	var usePoolSlice bool
-
-	// 如果池中的切片不够大，则创建新的切片
-	if len(pooledSlice) >= totalLen {
-		packetData = pooledSlice[:totalLen] // 使用池中的切片，调整长度
-		usePoolSlice = true
-	} else {
-		// 池中切片太小，创建新的切片，并立即归还小切片
-		packetData = make([]byte, totalLen)
-		packetPool.Put(pooledSlice) // 立即归还小切片
-		usePoolSlice = false
-		log.Printf("[DEBUG] Pool slice too small (%d < %d) for TCP packet, allocating new slice",
-			len(pooledSlice), totalLen)
-	}
-
-	// 获取本地MAC地址
-	localMAC := GetLocalMAC()
-
-	// 构建以太网头 (简化处理，使用广播地址)
-	copy(packetData[0:6], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // 目标MAC
-	copy(packetData[6:12], localMAC[:])                               // 源MAC
-	binary.BigEndian.PutUint16(packetData[12:14], 0x0800)             // EtherType: IPv4
-
-	// 构建IP头
-	ipStart := 14
-	packetData[ipStart] = 0x45                                                           // 版本和头长度
-	packetData[ipStart+1] = 0x00                                                         // TOS
-	binary.BigEndian.PutUint16(packetData[ipStart+2:ipStart+4], uint16(20+20+len(data))) // 总长度
-	binary.BigEndian.PutUint16(packetData[ipStart+4:ipStart+6], 0x1234)                  // ID
-	binary.BigEndian.PutUint16(packetData[ipStart+6:ipStart+8], 0x4000)                  // 标志和片偏移
-	packetData[ipStart+8] = 64                                                           // TTL
-	packetData[ipStart+9] = 6                                                            // 协议: TCP
-	binary.BigEndian.PutUint16(packetData[ipStart+10:ipStart+12], 0)                     // 校验和(稍后计算)
-	copy(packetData[ipStart+12:ipStart+16], srcIP.To4())                                 // 源IP
-	copy(packetData[ipStart+16:ipStart+20], dstIP.To4())                                 // 目标IP
-
-	// 构建TCP头
-	tcpStart := ipStart + 20
-	binary.BigEndian.PutUint16(packetData[tcpStart:tcpStart+2], srcPort)   // 源端口
-	binary.BigEndian.PutUint16(packetData[tcpStart+2:tcpStart+4], dstPort) // 目标端口
-	binary.BigEndian.PutUint32(packetData[tcpStart+4:tcpStart+8], seqNum)  // 序列号
-	binary.BigEndian.PutUint32(packetData[tcpStart+8:tcpStart+12], ackNum) // 确认号
-	packetData[tcpStart+12] = 0x50                                         // 数据偏移 (20字节)
-	packetData[tcpStart+13] = flags                                        // 标志位
-	binary.BigEndian.PutUint16(packetData[tcpStart+14:tcpStart+16], 65535) // 窗口大小
-	binary.BigEndian.PutUint16(packetData[tcpStart+16:tcpStart+18], 0)     // 校验和(稍后计算)
-	binary.BigEndian.PutUint16(packetData[tcpStart+18:tcpStart+20], 0)     // 紧急指针
-
-	// 复制数据
-	if len(data) > 0 {
-		copy(packetData[tcpStart+20:tcpStart+20+len(data)], data)
-	}
-
-	// 计算IP头校验和
-	packetData[ipStart+10] = 0
-	packetData[ipStart+11] = 0
-	ipChecksum := calcIPChecksum(packetData[ipStart : ipStart+20])
-	binary.BigEndian.PutUint16(packetData[ipStart+10:ipStart+12], ipChecksum)
-
-	// 计算TCP校验和
-	binary.BigEndian.PutUint16(packetData[tcpStart+16:tcpStart+18], 0) // 先清零校验和字段
-	tcpLen := 20 + len(data)
-	tcpChecksum := calcTCPChecksum(srcIP, dstIP, packetData[tcpStart:tcpStart+tcpLen])
-	binary.BigEndian.PutUint16(packetData[tcpStart+16:tcpStart+18], tcpChecksum)
-
-	// 发送数据包
-	err := SendRawBytes(packetData)
-
-	// 只有使用了池切片的情况下才归还，且归还时恢复原始长度
-	if usePoolSlice {
-		// 将切片长度恢复为原始容量再归还给池
-		packetPool.Put(pooledSlice[:cap(pooledSlice)])
-	}
-
-	return err
-}
-
-// calcIPChecksum 计算IP头校验和
-func calcIPChecksum(data []byte) uint16 {
-	sum := uint32(0)
-	for i := 0; i < len(data)-1; i += 2 {
-		sum += uint32(binary.BigEndian.Uint16(data[i : i+2]))
-	}
-	for (sum >> 16) > 0 {
-		sum = (sum & 0xFFFF) + (sum >> 16)
-	}
-	return ^uint16(sum)
-}
-
-// calcTCPChecksum 计算TCP校验和
-func calcTCPChecksum(srcIP, dstIP net.IP, tcpData []byte) uint16 {
-	// TCP伪头部：源IP(4) + 目标IP(4) + 协议(1) + TCP长度(2) = 12字节
-	pseudoHeader := make([]byte, 12)
-	copy(pseudoHeader[0:4], srcIP.To4())
-	copy(pseudoHeader[4:8], dstIP.To4())
-	pseudoHeader[8] = 0 // 填充
-	pseudoHeader[9] = 6 // TCP协议号
-	binary.BigEndian.PutUint16(pseudoHeader[10:12], uint16(len(tcpData)))
-
-	// 计算校验和
-	sum := uint32(0)
-
-	// 伪头部校验和
-	for i := 0; i < len(pseudoHeader); i += 2 {
-		sum += uint32(binary.BigEndian.Uint16(pseudoHeader[i : i+2]))
-	}
-
-	// TCP头和数据校验和
-	for i := 0; i < len(tcpData)-1; i += 2 {
-		sum += uint32(binary.BigEndian.Uint16(tcpData[i : i+2]))
-	}
-
-	// 如果TCP数据长度是奇数，处理最后一个字节
-	if len(tcpData)%2 == 1 {
-		sum += uint32(tcpData[len(tcpData)-1]) << 8
-	}
-
-	// 折叠进位
-	for (sum >> 16) > 0 {
-		sum = (sum & 0xFFFF) + (sum >> 16)
-	}
-
-	return ^uint16(sum)
-}
-
-// GetLocalMAC 获取本地网卡 MAC 地址
-func GetLocalMAC() [6]uint8 {
-	return localMAC
 }
