@@ -427,3 +427,21 @@ func IntegrateGVisorWithDPDK(localIP net.IP, localMAC [6]byte) error {
 	log.Printf("[INFO] GVisor netstack integrated with DPDK successfully")
 	return nil
 }
+
+// CreateGVisorTCPListener 通过 gVisor netstack 创建 TCP 监听器
+func CreateGVisorTCPListener(port uint16) (net.Listener, error) {
+	gvs := GetGVisorNetstack()
+	if gvs == nil {
+		return nil, fmt.Errorf("gVisor netstack not initialized")
+	}
+	return gvs.CreateTCPListener(port)
+}
+
+// CreateGVisorUDPConn 通过 gVisor netstack 创建 UDP 连接
+func CreateGVisorUDPConn(port uint16) (net.PacketConn, error) {
+	gvs := GetGVisorNetstack()
+	if gvs == nil {
+		return nil, fmt.Errorf("gVisor netstack not initialized")
+	}
+	return gvs.CreateUDPConn(port)
+}

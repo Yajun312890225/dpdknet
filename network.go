@@ -105,10 +105,19 @@ func initializeGlobalNetwork() error {
 		log.Printf("[DEBUG] DPDK system already started")
 	}
 
+	// 初始化和启动 gVisor netstack
+	log.Printf("[DEBUG] Initializing gVisor netstack...")
+	localIP := net.IPv4(192, 168, 1, 100) // 默认IP，可以通过环境变量或配置文件设置
+	if err := IntegrateGVisorWithDPDK(localIP, localMAC); err != nil {
+		log.Printf("[ERROR] Failed to integrate gVisor with DPDK: %v", err)
+		return err
+	}
+	log.Printf("[DEBUG] gVisor netstack integrated successfully")
+
 	return nil
 }
 
-// globalPacketHandler 全局包处理器，根据协议类型分发包
+// globalPacketHandler 全局包处理器，优先通过 gVisor netstack 处理
 func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 	data := pkt.GetRawPacketBytes()
 
@@ -122,6 +131,14 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 		return
 	}
 
+	// 首先尝试通过 gVisor netstack 处理
+	if gvisor := GetGVisorNetstack(); gvisor != nil {
+		// 注入到 gVisor netstack 进行协议栈处理
+		gvisor.InjectDPDKPacket(data)
+		return
+	}
+
+	// Fallback: 如果 gVisor netstack 未启用，使用原有处理方式
 	ipHeaderStart := 14
 	if len(data) < ipHeaderStart+20 {
 		return
