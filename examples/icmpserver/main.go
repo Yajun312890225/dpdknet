@@ -35,8 +35,8 @@ func main() {
 	go func() {
 		buffer := make([]byte, 1500)
 		for {
-			// 读取ICMP数据包
-			n, addr, err := conn.ReadFrom(buffer)
+			// 使用 ReadFromIP 读取ICMP数据包
+			n, addr, err := conn.ReadFromIP(buffer)
 			if err != nil {
 				log.Printf("[ERROR] Failed to read ICMP packet: %v", err)
 				return
@@ -115,8 +115,8 @@ func demonstratePingWithNewInterface() {
 		icmpData[6] = 0x00 // Sequence
 		icmpData[7] = 0x01
 
-		// 发送ICMP包
-		_, err = conn.WriteTo(icmpData, addr)
+		// 发送ICMP包使用 WriteToIP
+		_, err = conn.WriteToIP(icmpData, addr)
 		if err != nil {
 			log.Printf("[ERROR] Failed to send ICMP packet to %s: %v", target, err)
 		} else {

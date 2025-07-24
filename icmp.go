@@ -57,11 +57,54 @@ type ICMPPacket struct {
 	Data []byte
 }
 
+// IPConn 实现兼容 net.IPConn 的IP连接
+type IPConn struct {
+	*ICMPConn
+}
+
+// ReadFromIP 从IP连接读取数据包
+func (c *IPConn) ReadFromIP(b []byte) (int, *net.IPAddr, error) {
+	n, addr, err := c.ICMPConn.ReadFrom(b)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	ipAddr, ok := addr.(*net.IPAddr)
+	if !ok {
+		return 0, nil, fmt.Errorf("invalid address type")
+	}
+
+	return n, ipAddr, nil
+}
+
+// WriteToIP 向指定IP地址发送数据包
+func (c *IPConn) WriteToIP(b []byte, addr *net.IPAddr) (int, error) {
+	return c.ICMPConn.WriteTo(b, addr)
+}
+
+// ReadMsgIP 读取消息（带控制信息）
+func (c *IPConn) ReadMsgIP(b, oob []byte) (n, oobn, flags int, addr *net.IPAddr, err error) {
+	// 简化实现，不支持控制消息
+	n, ipAddr, err := c.ReadFromIP(b)
+	return n, 0, 0, ipAddr, err
+}
+
+// WriteMsgIP 写入消息（带控制信息）
+func (c *IPConn) WriteMsgIP(b, oob []byte, addr *net.IPAddr) (n, oobn int, err error) {
+	// 简化实现，不支持控制消息
+	n, err = c.WriteToIP(b, addr)
+	return n, 0, err
+}
+
 // ListenIP 创建一个监听指定协议的连接，兼容 net.ListenIP
-func ListenIP(network string, laddr *net.IPAddr) (net.PacketConn, error) {
+func ListenIP(network string, laddr *net.IPAddr) (*IPConn, error) {
 	switch network {
 	case "ip4:icmp", "ip:icmp":
-		return NewICMPListener(laddr)
+		icmpConn, err := NewICMPListener(laddr)
+		if err != nil {
+			return nil, err
+		}
+		return &IPConn{ICMPConn: icmpConn.(*ICMPConn)}, nil
 	default:
 		return nil, fmt.Errorf("unsupported network type: %s", network)
 	}

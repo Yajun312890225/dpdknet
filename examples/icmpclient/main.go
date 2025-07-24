@@ -70,7 +70,7 @@ func main() {
 	fmt.Printf("PING %s (%s): %d data bytes\n", target, targetIP.String(), 56)
 
 	start := time.Now()
-	err = pingWithPacketConn(conn, targetAddr, count, time.Duration(timeoutSec)*time.Second)
+	err = pingWithIPConn(conn, targetAddr, count, time.Duration(timeoutSec)*time.Second)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -121,6 +121,68 @@ func pingWithPacketConn(conn net.PacketConn, targetAddr net.Addr, count int, tim
 		conn.SetReadDeadline(time.Now().Add(timeout))
 
 		n, addr, err := conn.ReadFrom(buffer)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				fmt.Printf("Request timeout for seq=%d\n", i)
+			} else {
+				log.Printf("[ERROR] Failed to read ICMP reply %d: %v", i, err)
+			}
+			continue
+		}
+
+		// 检查是否是我们期望的回复
+		if n >= 8 && buffer[0] == 0 { // Echo Reply
+			replyID := (uint16(buffer[4]) << 8) | uint16(buffer[5])
+			replySeq := (uint16(buffer[6]) << 8) | uint16(buffer[7])
+
+			if replyID == id && int(replySeq) == i {
+				rtt := time.Since(start)
+				fmt.Printf("Reply from %s: seq=%d time=%v\n", addr.String(), i, rtt)
+			}
+		}
+
+		if i < count {
+			time.Sleep(time.Second)
+		}
+	}
+	return nil
+}
+
+// pingWithIPConn 使用IPConn接口实现ping功能
+func pingWithIPConn(conn *dpdknet.IPConn, targetAddr *net.IPAddr, count int, timeout time.Duration) error {
+	id := uint16(time.Now().Unix() & 0xFFFF)
+
+	for i := 1; i <= count; i++ {
+		// 构造ICMP Echo Request
+		icmpData := make([]byte, 8+8) // ICMP头8字节 + 数据8字节
+		icmpData[0] = 8               // Echo Request
+		icmpData[1] = 0               // Code
+		// Checksum 字段留空，由底层计算
+		icmpData[4] = byte(id >> 8)   // ID高字节
+		icmpData[5] = byte(id & 0xFF) // ID低字节
+		icmpData[6] = byte(i >> 8)    // Sequence高字节
+		icmpData[7] = byte(i & 0xFF)  // Sequence低字节
+
+		// 添加时间戳作为数据
+		timestamp := time.Now().UnixNano()
+		for j := 0; j < 8; j++ {
+			icmpData[8+j] = byte(timestamp >> (8 * (7 - j)))
+		}
+
+		start := time.Now()
+
+		// 发送ICMP数据包使用 WriteToIP
+		_, err := conn.WriteToIP(icmpData, targetAddr)
+		if err != nil {
+			log.Printf("[ERROR] Failed to send ICMP packet %d: %v", i, err)
+			continue
+		}
+
+		// 等待回复
+		buffer := make([]byte, 1500)
+		conn.SetReadDeadline(time.Now().Add(timeout))
+
+		n, addr, err := conn.ReadFromIP(buffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				fmt.Printf("Request timeout for seq=%d\n", i)
