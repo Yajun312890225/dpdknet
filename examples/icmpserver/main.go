@@ -15,49 +15,50 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	log.Printf("[INFO] Starting ICMP Server example...")
 
-	// 获取本地IP地址
-	localIP := getLocalIP()
-	if localIP == nil {
-		log.Fatalf("[ERROR] Could not determine local IP address")
-	}
-
-	log.Printf("[INFO] Using local IP: %s", localIP.String())
-
-	// 创建ICMP连接
-	log.Printf("[INFO] Creating ICMP connection...")
-	conn, err := dpdknet.NewICMPConn(localIP)
+	// 使用兼容 net 包的接口创建ICMP监听器
+	log.Printf("[INFO] Creating ICMP listener using dpdknet.ListenIP...")
+	conn, err := dpdknet.ListenIP("ip4:icmp", nil)
 	if err != nil {
-		log.Fatalf("[ERROR] Failed to create ICMP connection: %v", err)
+		log.Fatalf("[ERROR] Failed to create ICMP listener: %v", err)
 	}
 	defer conn.Close()
 
-	log.Printf("[INFO] ICMP server started on %s", localIP.String())
+	log.Printf("[INFO] ICMP server listening on %s", conn.LocalAddr().String())
 	log.Printf("[INFO] Server is ready to handle ICMP packets...")
-	log.Printf("[INFO] Note: ICMP echo requests are automatically handled by the network layer")
+	log.Printf("[INFO] Compatible with net.ListenIP interface")
 
 	// 设置信号处理
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// 服务器主循环 - 监控ICMP活动
+	// 服务器主循环 - 读取ICMP数据包
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-
+		buffer := make([]byte, 1500)
 		for {
-			select {
-			case <-ticker.C:
-				log.Printf("[INFO] ICMP server is running... (listening for ping requests)")
-				
-			case <-sigCh:
-				log.Printf("[INFO] Shutdown signal received")
+			// 读取ICMP数据包
+			n, addr, err := conn.ReadFrom(buffer)
+			if err != nil {
+				log.Printf("[ERROR] Failed to read ICMP packet: %v", err)
 				return
+			}
+
+			if n > 0 {
+				log.Printf("[INFO] Received ICMP packet from %s: %d bytes", addr.String(), n)
+
+				// 解析ICMP类型
+				if n >= 1 {
+					icmpType := buffer[0]
+					log.Printf("[INFO] ICMP Type: %d", icmpType)
+
+					// ICMP Echo请求自动回复由网络层处理
+					// 这里只是记录收到的数据包
+				}
 			}
 		}
 	}()
 
-	// 演示发送ping到常见地址
-	go demonstratePing(conn)
+	// 演示发送ping
+	go demonstratePingWithNewInterface()
 
 	// 等待退出信号
 	<-sigCh
@@ -77,33 +78,52 @@ func getLocalIP() net.IP {
 	return localAddr.IP
 }
 
-func demonstratePing(conn *dpdknet.ICMPConn) {
+func demonstratePingWithNewInterface() {
 	time.Sleep(5 * time.Second) // 等待服务器启动完成
+
+	log.Printf("[INFO] Starting ping demonstration with new interface...")
+
+	// 使用兼容接口创建ICMP客户端连接
+	conn, err := dpdknet.ListenIP("ip4:icmp", nil)
+	if err != nil {
+		log.Printf("[ERROR] Failed to create ICMP client connection: %v", err)
+		return
+	}
+	defer conn.Close()
 
 	testTargets := []string{
 		"127.0.0.1",
 		"192.168.1.1",
-		"8.8.8.8",
 	}
 
-	log.Printf("[INFO] Starting ping demonstration...")
-
 	for _, target := range testTargets {
-		ip := net.ParseIP(target)
-		if ip == nil {
-			log.Printf("[ERROR] Invalid IP address: %s", target)
+		addr, err := dpdknet.ResolveIPAddr("ip4:icmp", target)
+		if err != nil {
+			log.Printf("[ERROR] Failed to resolve address %s: %v", target, err)
 			continue
 		}
 
-		log.Printf("[INFO] Attempting to ping %s...", target)
+		log.Printf("[INFO] Attempting to ping %s using new interface...", target)
 
-		// 发送3个ping包
-		err := conn.Ping(ip, 3, 2*time.Second)
+		// 构造ICMP Echo Request
+		icmpData := make([]byte, 8)
+		icmpData[0] = 8 // Echo Request
+		icmpData[1] = 0 // Code
+		// Checksum will be calculated by sendRawICMP
+		icmpData[4] = 0x12 // ID
+		icmpData[5] = 0x34
+		icmpData[6] = 0x00 // Sequence
+		icmpData[7] = 0x01
+
+		// 发送ICMP包
+		_, err = conn.WriteTo(icmpData, addr)
 		if err != nil {
-			log.Printf("[WARNING] Ping to %s failed: %v", target, err)
+			log.Printf("[ERROR] Failed to send ICMP packet to %s: %v", target, err)
+		} else {
+			log.Printf("[INFO] ICMP packet sent to %s", target)
 		}
 
-		time.Sleep(2 * time.Second) // 间隔
+		time.Sleep(2 * time.Second)
 	}
 
 	log.Printf("[INFO] Ping demonstration completed")
