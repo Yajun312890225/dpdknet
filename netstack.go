@@ -187,7 +187,6 @@ func (gvs *GVisorNetstack) Stop() {
 
 // InjectDPDKPacket 从 DPDK 注入数据包到 gVisor 协议栈
 func (gvs *GVisorNetstack) InjectDPDKPacket(data []byte) {
-	log.Printf("[DEBUG] Injecting packet to gVisor netstack: %d bytes", len(data))
 	if !gvs.started {
 		gvs.stats.PacketsDropped++
 		return

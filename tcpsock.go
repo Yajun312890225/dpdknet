@@ -9,59 +9,23 @@ import (
 	"time"
 )
 
-const (
-	TCPFlagFIN = 0x01
-	TCPFlagSYN = 0x02
-	TCPFlagRST = 0x04
-	TCPFlagPSH = 0x08
-	TCPFlagACK = 0x10
-	TCPFlagURG = 0x20
-)
-
-type TCPState int
-
-const (
-	TCPStateClosed TCPState = iota
-	TCPStateListen
-	TCPStateSynSent
-	TCPStateSynReceived
-	TCPStateEstablished
-	TCPStateFinWait1
-	TCPStateFinWait2
-	TCPStateCloseWait
-	TCPStateClosing
-	TCPStateLastAck
-	TCPStateTimeWait
-)
-
-type TCPHeader struct {
-	SrcPort    uint16
-	DstPort    uint16
-	SeqNum     uint32
-	AckNum     uint32
-	DataOffset uint8
-	Flags      uint8
-	Window     uint16
-	Checksum   uint16
-	UrgentPtr  uint16
-}
-
 type TCPConn struct {
 	localAddr  *TCPAddr
 	remoteAddr *TCPAddr
-	state      TCPState
-	seqNum     uint32
-	ackNum     uint32
-	dataCh     chan []byte
 	mu         sync.Mutex
 	closed     bool
+
+	// gVisor 集成
+	gvisorConn net.Conn // gVisor TCP 连接
 }
 
 type TCPListener struct {
 	localAddr *TCPAddr
-	connCh    chan *TCPConn
 	mu        sync.Mutex
 	closed    bool
+
+	// gVisor 集成
+	gvisorListener net.Listener // gVisor TCP 监听器
 }
 
 func ListenTCP(network string, laddr *TCPAddr) (*TCPListener, error) {
@@ -72,15 +36,18 @@ func ListenTCP(network string, laddr *TCPAddr) (*TCPListener, error) {
 
 	listener := &TCPListener{
 		localAddr: laddr,
-		connCh:    make(chan *TCPConn, 1024),
 	}
 
-	// 注册TCP监听器到全局网络系统
-	key := fmt.Sprintf("tcp:%s:%d", laddr.IP.String(), laddr.Port)
-	if err := RegisterTCPListener(key, listener); err != nil {
-		return nil, err
+	// 强制使用 gVisor netstack
+	log.Printf("[DEBUG] Creating TCP listener using gVisor netstack")
+	gvisorListener, err := CreateGVisorTCPListener(uint16(laddr.Port))
+	if err != nil {
+		log.Printf("[ERROR] Failed to create gVisor TCP listener: %v", err)
+		return nil, fmt.Errorf("failed to create gVisor TCP listener: %v", err)
 	}
 
+	listener.gvisorListener = gvisorListener
+	log.Printf("[INFO] TCP listener created using gVisor netstack on port %d", laddr.Port)
 	return listener, nil
 }
 
@@ -92,21 +59,36 @@ func (l *TCPListener) Accept() (net.Conn, error) {
 	}
 	l.mu.Unlock()
 
-	// 从连接队列中获取新连接
-	select {
-	case conn, ok := <-l.connCh:
-		if !ok {
-			return nil, errors.New("listener closed")
-		}
-		if conn == nil {
-			return nil, errors.New("received nil connection")
-		}
-		log.Printf("[DEBUG] Accepted new TCP connection: %s -> %s",
-			conn.remoteAddr.String(), conn.localAddr.String())
-		return conn, nil
-	case <-time.After(30 * time.Second):
-		return nil, errors.New("accept timeout")
+	if l.gvisorListener == nil {
+		return nil, errors.New("gVisor listener not available")
 	}
+
+	// 从 gVisor 监听器接受连接
+	gvisorConn, err := l.gvisorListener.Accept()
+	if err != nil {
+		return nil, err
+	}
+
+	// 包装为 TCPConn
+	tcpConn := &TCPConn{
+		localAddr:  l.localAddr,
+		gvisorConn: gvisorConn,
+	}
+
+	// 尝试获取远程地址
+	if remoteAddr := gvisorConn.RemoteAddr(); remoteAddr != nil {
+		if tcpAddr, ok := remoteAddr.(*net.TCPAddr); ok {
+			tcpConn.remoteAddr = &TCPAddr{
+				IP:   tcpAddr.IP,
+				Port: tcpAddr.Port,
+				Zone: tcpAddr.Zone,
+			}
+		}
+	}
+
+	log.Printf("[DEBUG] Accepted new TCP connection: %s -> %s",
+		tcpConn.RemoteAddr().String(), tcpConn.LocalAddr().String())
+	return tcpConn, nil
 }
 
 // AcceptTCP accepts the next incoming call and returns the new connection.
@@ -125,12 +107,14 @@ func (l *TCPListener) Close() error {
 		return nil
 	}
 
-	// 从全局网络系统中注销监听器
-	key := fmt.Sprintf("tcp:%s:%d", l.localAddr.IP.String(), l.localAddr.Port)
-	UnregisterTCPListener(key)
-
 	l.closed = true
-	close(l.connCh)
+
+	// 强制使用 gVisor，关闭 gVisor 监听器
+	if l.gvisorListener != nil {
+		err := l.gvisorListener.Close()
+		log.Printf("[DEBUG] gVisor TCP listener closed")
+		return err
+	}
 
 	log.Printf("[DEBUG] TCP listener closed: %s", l.localAddr.String())
 	return nil
@@ -147,24 +131,9 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 		return nil, err
 	}
 
-	localAddr := laddr
-	if localAddr == nil {
-		// 使用随机端口
-		localAddr = &TCPAddr{
-			IP:   net.IPv4(0, 0, 0, 0),                 // 让系统选择本地IP
-			Port: int(time.Now().Unix()%10000 + 20000), // 随机端口 20000-29999
-		}
-	}
-
-	conn := &TCPConn{
-		localAddr:  localAddr,
-		remoteAddr: raddr,
-		state:      TCPStateSynSent,
-		dataCh:     make(chan []byte, 1024),
-		seqNum:     uint32(time.Now().Unix()), // 初始序列号
-	}
-
-	return conn, nil
+	// 强制使用 gVisor，暂时不支持DialTCP（通常用于客户端连接）
+	// 大多数服务器应用只需要Listen功能
+	return nil, fmt.Errorf("DialTCP not implemented with gVisor yet, use standard net.Dial instead")
 }
 
 func (c *TCPConn) Read(buf []byte) (int, error) {
@@ -172,13 +141,11 @@ func (c *TCPConn) Read(buf []byte) (int, error) {
 		return 0, errors.New("connection closed")
 	}
 
-	select {
-	case data := <-c.dataCh:
-		n := copy(buf, data)
-		return n, nil
-	case <-time.After(30 * time.Second):
-		return 0, errors.New("read timeout")
+	if c.gvisorConn == nil {
+		return 0, errors.New("gVisor connection not available")
 	}
+
+	return c.gvisorConn.Read(buf)
 }
 
 func (c *TCPConn) Write(data []byte) (int, error) {
@@ -189,11 +156,11 @@ func (c *TCPConn) Write(data []byte) (int, error) {
 		return 0, errors.New("connection closed")
 	}
 
-	if c.state != TCPStateEstablished {
-		return 0, errors.New("connection not established")
+	if c.gvisorConn == nil {
+		return 0, errors.New("gVisor connection not available")
 	}
 
-	return len(data), nil
+	return c.gvisorConn.Write(data)
 }
 
 func (c *TCPConn) Close() error {
@@ -203,33 +170,51 @@ func (c *TCPConn) Close() error {
 		return nil
 	}
 	c.closed = true
-	c.state = TCPStateClosed
-	close(c.dataCh)
+
+	// 强制使用 gVisor，关闭 gVisor 连接
+	if c.gvisorConn != nil {
+		err := c.gvisorConn.Close()
+		log.Printf("[DEBUG] gVisor TCP connection closed")
+		return err
+	}
+
 	return nil
 }
 
 func (c *TCPConn) LocalAddr() net.Addr {
+	if c.gvisorConn != nil {
+		return c.gvisorConn.LocalAddr()
+	}
 	return c.localAddr
 }
 
 func (c *TCPConn) RemoteAddr() net.Addr {
+	if c.gvisorConn != nil {
+		return c.gvisorConn.RemoteAddr()
+	}
 	return c.remoteAddr
 }
 
 // SetDeadline sets the read and write deadlines associated with the connection.
 func (c *TCPConn) SetDeadline(t time.Time) error {
-	// TODO: 实现超时逻辑
+	if c.gvisorConn != nil {
+		return c.gvisorConn.SetDeadline(t)
+	}
 	return nil
 }
 
 // SetReadDeadline sets the deadline for future Read calls.
 func (c *TCPConn) SetReadDeadline(t time.Time) error {
-	// TODO: 实现读超时逻辑
+	if c.gvisorConn != nil {
+		return c.gvisorConn.SetReadDeadline(t)
+	}
 	return nil
 }
 
 // SetWriteDeadline sets the deadline for future Write calls.
 func (c *TCPConn) SetWriteDeadline(t time.Time) error {
-	// TODO: 实现写超时逻辑
+	if c.gvisorConn != nil {
+		return c.gvisorConn.SetWriteDeadline(t)
+	}
 	return nil
 }
