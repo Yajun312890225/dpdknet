@@ -17,19 +17,12 @@ var (
 	globalNetworkErr  error
 	globalTxFlow      *flow.Flow
 	globalSendCh      chan *packet.Packet
-	globalBytesCh     chan []byte // 高性能字节发送通道
-	udpListeners      map[string]*UDPConn
-	tcpListeners      map[string]*TCPListener
+	globalBytesCh     chan []byte                                       // 高性能字节发送通道
 	icmpHandlers      map[string]func([]byte, int, int, net.IP, net.IP) // ICMP处理器
-	udpListenersMutex sync.RWMutex
-	tcpListenersMutex sync.RWMutex
-	icmpHandlersMutex sync.RWMutex
-	localMAC          [6]uint8 // 本地网卡 MAC 地址
+	localMAC          [6]uint8                                          // 本地网卡 MAC 地址
 )
 
 func init() {
-	udpListeners = make(map[string]*UDPConn)
-	tcpListeners = make(map[string]*TCPListener)
 	icmpHandlers = make(map[string]func([]byte, int, int, net.IP, net.IP))
 	globalSendCh = make(chan *packet.Packet, 65536) // 进一步增大发送缓冲区到64K
 	globalBytesCh = make(chan []byte, 65536)        // 高性能字节通道
@@ -167,26 +160,6 @@ func globalSendGenerator(pkt *packet.Packet, ctx flow.UserContext) {
 	}
 }
 
-// RegisterUDPListener 注册UDP监听器
-func RegisterUDPListener(key string, conn *UDPConn) error {
-	udpListenersMutex.Lock()
-	defer udpListenersMutex.Unlock()
-
-	if _, exists := udpListeners[key]; exists {
-		return fmt.Errorf("UDP listener already exists for %s", key)
-	}
-
-	udpListeners[key] = conn
-	return nil
-}
-
-// UnregisterUDPListener 注销UDP监听器
-func UnregisterUDPListener(key string) {
-	udpListenersMutex.Lock()
-	defer udpListenersMutex.Unlock()
-	delete(udpListeners, key)
-}
-
 // SendRawBytes 直接发送字节数组，避免使用 packet.NewPacket()
 func SendRawBytes(data []byte) error {
 	if len(data) == 0 {
@@ -216,47 +189,4 @@ func SendPacket(pkt *packet.Packet) error {
 		log.Printf("[ERROR] Send queue full (%d/65536), dropping packet immediately", len(globalSendCh))
 		return fmt.Errorf("global send channel full")
 	}
-}
-
-// SendPacketReliable 可靠发送数据包，阻塞直到发送成功
-func SendPacketReliable(pkt *packet.Packet) error {
-	// 阻塞发送，确保包一定被放入队列
-	globalSendCh <- pkt
-	return nil
-}
-
-// FlushSendQueue 强制刷新发送队列 (调试用)
-func FlushSendQueue() {
-	// 这里可以添加强制刷新逻辑
-	log.Printf("[DEBUG] Send queue length: %d", len(globalSendCh))
-}
-
-// RegisterTCPListener 注册TCP监听器
-func RegisterTCPListener(key string, listener *TCPListener) error {
-	tcpListenersMutex.Lock()
-	defer tcpListenersMutex.Unlock()
-
-	if _, exists := tcpListeners[key]; exists {
-		return fmt.Errorf("TCP listener already exists for %s", key)
-	}
-
-	tcpListeners[key] = listener
-	log.Printf("[DEBUG] Registered TCP listener: %s", key)
-	return nil
-}
-
-// UnregisterTCPListener 注销TCP监听器
-func UnregisterTCPListener(key string) {
-	tcpListenersMutex.Lock()
-	defer tcpListenersMutex.Unlock()
-	delete(tcpListeners, key)
-	log.Printf("[DEBUG] Unregistered TCP listener: %s", key)
-}
-
-// FindTCPListenerByKey 根据key查找TCP监听器
-func FindTCPListenerByKey(key string) *TCPListener {
-	tcpListenersMutex.RLock()
-	defer tcpListenersMutex.RUnlock()
-
-	return tcpListeners[key]
 }
