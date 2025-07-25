@@ -343,10 +343,6 @@ func (gvs *GVisorNetstack) processDPDKPacket(data []byte) {
 	gvs.stats.PacketsProcessed++
 }
 
-// 修改 GVisorNetstack 的 sendPacketToDPDK 方法
-//
-// 您还需要修改 `GVisorNetstack` 的 `sendPacketToDPDK` 方法，使其检查是否需要进行 VXLAN 封装：
-//
 // sendPacketToDPDK 将 netstack 的数据包发送到 DPDK
 func (gvs *GVisorNetstack) sendPacketToDPDK(pkt *stack.PacketBuffer) {
 	// 构建以太网帧
