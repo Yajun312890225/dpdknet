@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -307,6 +308,10 @@ func (gvs *GVisorNetstack) processDPDKPacket(data []byte) {
 	gvs.stats.PacketsProcessed++
 }
 
+// 修改 GVisorNetstack 的 sendPacketToDPDK 方法
+//
+// 您还需要修改 `GVisorNetstack` 的 `sendPacketToDPDK` 方法，使其检查是否需要进行 VXLAN 封装：
+//
 // sendPacketToDPDK 将 netstack 的数据包发送到 DPDK
 func (gvs *GVisorNetstack) sendPacketToDPDK(pkt *stack.PacketBuffer) {
 	// 构建以太网帧
@@ -327,13 +332,33 @@ func (gvs *GVisorNetstack) sendPacketToDPDK(pkt *stack.PacketBuffer) {
 	payloadBytes := payload.Flatten()
 	copy(frame[14:], payloadBytes)
 
-	// 发送到 DPDK
+	// 检查是否需要 VXLAN 封装
+	err := HandleGVisorOutgoingPacket(frame)
+	if err == ErrVXLANPacketHandled {
+		// 包已经被 VXLAN 处理并发送，更新统计并返回
+		gvs.stats.PacketsSent++
+		return
+	} else if err != nil {
+		// 其他错误
+		log.Printf("[ERROR] Failed to handle VXLAN outgoing packet: %v", err)
+		gvs.stats.PacketsDropped++
+		return
+	}
+
+	// 如果没有进行 VXLAN 处理，正常发送原始帧
 	if err := SendRawBytes(frame); err != nil {
 		log.Printf("[ERROR] Failed to send packet to DPDK: %v", err)
 		gvs.stats.PacketsDropped++
 	} else {
 		gvs.stats.PacketsSent++
 	}
+}
+
+// getRemoteVTEPForDestination 获取目标 IP 对应的远程 VTEP
+func getRemoteVTEPForDestination(dstIP net.IP) net.IP {
+	// 这里需要实现 VTEP 映射逻辑
+	// 简化实现，可以从环境变量或配置文件获取
+	return net.ParseIP(os.Getenv("REMOTE_VTEP_IP"))
 }
 
 // CreateTCPListener 创建 TCP 监听器

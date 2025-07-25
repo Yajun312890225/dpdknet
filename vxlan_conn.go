@@ -1,22 +1,26 @@
 package dpdknet
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 )
 
-// VXLANConn VXLAN 连接，基于 DPDK 数据路径
+// 特殊错误，表示包已经被 VXLAN 处理
+var ErrVXLANPacketHandled = errors.New("packet handled by VXLAN")
+
+// VXLANConn VXLAN 连接，基于 gVisor 协议栈 + DPDK 数据路径
 type VXLANConn struct {
 	localAddr  *VXLANAddr
 	remoteAddr *VXLANAddr
 	handler    *VXLANHandler
-	readChan   chan []byte // 接收数据通道
-	writeChan  chan []byte // 发送数据通道
+	gvisorConn net.Conn // gVisor 协议栈连接
 	closed     bool
 	mu         sync.RWMutex
 }
@@ -145,12 +149,31 @@ func DialVXLAN(network string, localAddr, remoteAddr *VXLANAddr) (*VXLANConn, er
 		RemoteMAC: getRemoteMACFromARP(remoteVTEP), // 基于 VTEP IP 查询 MAC
 	}
 
+	// 通过 gVisor 创建内层连接
+	var gvisorConn net.Conn
+	var err error
+
+	switch remoteAddr.Protocol {
+	case "tcp":
+		localTCPAddr := &net.TCPAddr{IP: localAddr.IP, Port: localAddr.Port}
+		remoteTCPAddr := &net.TCPAddr{IP: remoteAddr.IP, Port: remoteAddr.Port}
+		gvisorConn, err = CreateGVisorTCPConn(localTCPAddr, remoteTCPAddr)
+	case "udp":
+		// UDP 连接稍后实现
+		return nil, fmt.Errorf("UDP VXLAN connections not yet implemented")
+	default:
+		return nil, fmt.Errorf("unsupported protocol: %s", remoteAddr.Protocol)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gVisor connection: %v", err)
+	}
+
 	vxlanConn := &VXLANConn{
 		localAddr:  localAddr,
 		remoteAddr: remoteAddr,
 		handler:    NewVXLANHandler(config),
-		readChan:   make(chan []byte, 100),
-		writeChan:  make(chan []byte, 100),
+		gvisorConn: gvisorConn,
 		closed:     false,
 	}
 
@@ -171,9 +194,10 @@ func DialVXLAN(network string, localAddr, remoteAddr *VXLANAddr) (*VXLANConn, er
 
 // startPacketProcessor 启动包处理器
 func (vc *VXLANConn) startPacketProcessor() {
-	for {
-		select {
-		case data := <-vc.writeChan:
+	// 从 gVisor 连接读取数据，封装为 VXLAN 包，通过 DPDK 发送
+	go func() {
+		buffer := make([]byte, 1500)
+		for {
 			vc.mu.RLock()
 			if vc.closed {
 				vc.mu.RUnlock()
@@ -181,12 +205,19 @@ func (vc *VXLANConn) startPacketProcessor() {
 			}
 			vc.mu.RUnlock()
 
+			// 从 gVisor 连接读取数据
+			n, err := vc.gvisorConn.Read(buffer)
+			if err != nil {
+				log.Printf("[DEBUG] gVisor connection read error: %v", err)
+				return
+			}
+
 			// 封装 VXLAN 包并通过 DPDK 发送
-			if err := vc.sendVXLANPacket(data); err != nil {
+			if err := vc.sendVXLANPacket(buffer[:n]); err != nil {
 				log.Printf("[ERROR] Failed to send VXLAN packet: %v", err)
 			}
 		}
-	}
+	}()
 }
 
 // sendVXLANPacket 发送 VXLAN 包
@@ -217,17 +248,8 @@ func (vc *VXLANConn) Read(b []byte) (n int, err error) {
 	}
 	vc.mu.RUnlock()
 
-	// 从读取通道获取数据
-	select {
-	case data := <-vc.readChan:
-		if len(data) > len(b) {
-			return 0, fmt.Errorf("buffer too small: need %d, got %d", len(data), len(b))
-		}
-		copy(b, data)
-		return len(data), nil
-	case <-time.After(30 * time.Second): // 30秒超时
-		return 0, fmt.Errorf("read timeout")
-	}
+	// 直接从 gVisor 连接读取
+	return vc.gvisorConn.Read(b)
 }
 
 // Write 实现 net.Conn 接口
@@ -239,13 +261,8 @@ func (vc *VXLANConn) Write(b []byte) (n int, err error) {
 	}
 	vc.mu.RUnlock()
 
-	// 将数据发送到写入通道
-	select {
-	case vc.writeChan <- b:
-		return len(b), nil
-	case <-time.After(5 * time.Second): // 5秒超时
-		return 0, fmt.Errorf("write timeout")
-	}
+	// 直接写入 gVisor 连接
+	return vc.gvisorConn.Write(b)
 }
 
 // Close 实现 net.Conn 接口
@@ -258,8 +275,11 @@ func (vc *VXLANConn) Close() error {
 	}
 
 	vc.closed = true
-	close(vc.readChan)
-	close(vc.writeChan)
+
+	// 关闭 gVisor 连接
+	if vc.gvisorConn != nil {
+		vc.gvisorConn.Close()
+	}
 
 	// 从全局连接表中移除
 	connKey := fmt.Sprintf("%s:%d", vc.remoteAddr.IP.String(), vc.remoteAddr.VNI)
@@ -299,13 +319,13 @@ func (vc *VXLANConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }
 
-// VXLANListener VXLAN 监听器，基于 DPDK 数据路径
+// VXLANListener VXLAN 监听器，基于 gVisor 协议栈 + DPDK 数据路径
 type VXLANListener struct {
-	addr     *VXLANAddr
-	handler  *VXLANHandler
-	acceptCh chan *VXLANConn
-	closed   bool
-	mu       sync.RWMutex
+	addr           *VXLANAddr
+	handler        *VXLANHandler
+	gvisorListener net.Listener // gVisor 协议栈监听器
+	closed         bool
+	mu             sync.RWMutex
 }
 
 // ListenVXLAN 创建 VXLAN 监听器
@@ -331,11 +351,29 @@ func ListenVXLAN(network string, addr *VXLANAddr) (*VXLANListener, error) {
 		RemoteMAC: nil, // 监听器不需要远程 MAC
 	}
 
+	// 通过 gVisor 创建内层监听器
+	var gvisorListener net.Listener
+	var err error
+
+	switch addr.Protocol {
+	case "tcp":
+		gvisorListener, err = CreateGVisorTCPListener(uint16(addr.Port))
+	case "udp":
+		// UDP 监听器稍后实现
+		return nil, fmt.Errorf("UDP VXLAN listeners not yet implemented")
+	default:
+		return nil, fmt.Errorf("unsupported protocol: %s", addr.Protocol)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gVisor listener: %v", err)
+	}
+
 	listener := &VXLANListener{
-		addr:     addr,
-		handler:  NewVXLANHandler(config),
-		acceptCh: make(chan *VXLANConn, 100),
-		closed:   false,
+		addr:           addr,
+		handler:        NewVXLANHandler(config),
+		gvisorListener: gvisorListener,
+		closed:         false,
 	}
 
 	// 注册 VXLAN 处理器到全局包处理器
@@ -354,10 +392,44 @@ func (vl *VXLANListener) Accept() (net.Conn, error) {
 	}
 	vl.mu.RUnlock()
 
-	select {
-	case conn := <-vl.acceptCh:
-		return conn, nil
+	// 从 gVisor 监听器接受连接
+	gvisorConn, err := vl.gvisorListener.Accept()
+	if err != nil {
+		return nil, err
 	}
+
+	// 包装为 VXLANConn
+	vxlanConn := &VXLANConn{
+		localAddr:  vl.addr,
+		handler:    vl.handler,
+		gvisorConn: gvisorConn,
+		closed:     false,
+	}
+
+	// 尝试获取远程地址信息
+	if remoteAddr := gvisorConn.RemoteAddr(); remoteAddr != nil {
+		switch addr := remoteAddr.(type) {
+		case *net.TCPAddr:
+			vxlanConn.remoteAddr = &VXLANAddr{
+				IP:       addr.IP,
+				Port:     addr.Port,
+				VNI:      vl.addr.VNI,
+				Protocol: vl.addr.Protocol,
+			}
+		case *net.UDPAddr:
+			vxlanConn.remoteAddr = &VXLANAddr{
+				IP:       addr.IP,
+				Port:     addr.Port,
+				VNI:      vl.addr.VNI,
+				Protocol: vl.addr.Protocol,
+			}
+		}
+	}
+
+	// 启动包处理器
+	go vxlanConn.startPacketProcessor()
+
+	return vxlanConn, nil
 }
 
 // Close 实现 net.Listener 接口
@@ -370,7 +442,11 @@ func (vl *VXLANListener) Close() error {
 	}
 
 	vl.closed = true
-	close(vl.acceptCh)
+
+	// 关闭 gVisor 监听器
+	if vl.gvisorListener != nil {
+		vl.gvisorListener.Close()
+	}
 
 	// 注销 VXLAN 处理器
 	unregisterVXLANHandler(vl.addr.VNI)
@@ -413,56 +489,181 @@ func handleIncomingVXLANPacket(data []byte) {
 
 	// 创建临时处理器进行解封装
 	tmpHandler := NewVXLANHandler(DefaultVXLANConfig())
-	innerPayload, innerSrcIP, _, innerSrcPort, _, protocol, vni, err := tmpHandler.DecapsulateVXLAN(data)
+	innerPayload, innerSrcIP, innerDstIP, innerSrcPort, innerDstPort, protocol, vni, err := tmpHandler.DecapsulateVXLAN(data)
 	if err != nil {
 		log.Printf("[DEBUG] Failed to decapsulate VXLAN packet: %v", err)
 		return
 	}
 
-	// 查找对应的处理器
+	// 保存 VNI 映射信息，用于回程封装
+	saveVNIMapping(innerSrcIP, innerDstIP, vni)
+
+	// 构建内层 IP 包
+	innerIPPacket := constructInnerIPPacket(innerPayload, innerSrcIP, innerDstIP, innerSrcPort, innerDstPort, protocol)
+
+	// 注入到 gVisor netstack 进行协议栈处理
+	if gvisor := GetGVisorNetstack(); gvisor != nil {
+		gvisor.InjectDPDKPacket(innerIPPacket)
+		log.Printf("[DEBUG] VXLAN packet injected to gVisor: src=%s:%d, dst=%s:%d, VNI=%d",
+			innerSrcIP, innerSrcPort, innerDstIP, innerDstPort, vni)
+	}
+}
+
+// 保存 VNI 映射信息，用于回程封装
+var (
+	vniMappings     = make(map[string]uint32) // IP对 -> VNI
+	vniMappingMutex sync.RWMutex
+)
+
+// saveVNIMapping 保存 VNI 映射信息
+func saveVNIMapping(srcIP, dstIP net.IP, vni uint32) {
+	key := fmt.Sprintf("%s-%s", srcIP.String(), dstIP.String())
+	vniMappingMutex.Lock()
+	vniMappings[key] = vni
+	vniMappingMutex.Unlock()
+}
+
+// getVNIForDestination 获取目标 IP 对应的 VNI
+func getVNIForDestination(srcIP, dstIP net.IP) (uint32, bool) {
+	key := fmt.Sprintf("%s-%s", srcIP.String(), dstIP.String())
+	vniMappingMutex.RLock()
+	vni, exists := vniMappings[key]
+	vniMappingMutex.RUnlock()
+	return vni, exists
+}
+
+// constructInnerIPPacket 构建内层 IP 包
+func constructInnerIPPacket(payload []byte, srcIP, dstIP net.IP, srcPort, dstPort uint16, protocol layers.IPProtocol) []byte {
+	// 创建以太网帧
+	ethLayer := &layers.Ethernet{
+		SrcMAC:       generateInnerMAC(srcIP),
+		DstMAC:       generateInnerMAC(dstIP),
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	// 创建 IP 层
+	ipLayer := &layers.IPv4{
+		Version:  4,
+		IHL:      5,
+		TTL:      64,
+		Protocol: protocol,
+		SrcIP:    srcIP,
+		DstIP:    dstIP,
+	}
+
+	// 创建传输层
+	var transportLayer gopacket.SerializableLayer
+
+	switch protocol {
+	case layers.IPProtocolTCP:
+		transportLayer = &layers.TCP{
+			SrcPort: layers.TCPPort(srcPort),
+			DstPort: layers.TCPPort(dstPort),
+		}
+		tcp := transportLayer.(*layers.TCP)
+		tcp.SetNetworkLayerForChecksum(ipLayer)
+	case layers.IPProtocolUDP:
+		transportLayer = &layers.UDP{
+			SrcPort: layers.UDPPort(srcPort),
+			DstPort: layers.UDPPort(dstPort),
+		}
+		udp := transportLayer.(*layers.UDP)
+		udp.SetNetworkLayerForChecksum(ipLayer)
+	case layers.IPProtocolICMPv4:
+		transportLayer = &layers.ICMPv4{
+			TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		}
+	}
+
+	// 序列化包
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	var err error
+	if transportLayer != nil {
+		err = gopacket.SerializeLayers(buf, opts, ethLayer, ipLayer, transportLayer, gopacket.Payload(payload))
+	} else {
+		err = gopacket.SerializeLayers(buf, opts, ethLayer, ipLayer, gopacket.Payload(payload))
+	}
+
+	if err != nil {
+		log.Printf("[ERROR] Failed to serialize inner IP packet: %v", err)
+		return nil
+	}
+
+	return buf.Bytes()
+}
+
+// HandleGVisorOutgoingPacket 处理从 gVisor 发出的包，检查是否需要 VXLAN 封装
+// 返回 ErrVXLANPacketHandled 表示包已被 VXLAN 处理并发送
+// 返回 nil 表示不需要 VXLAN 处理，应该正常发送
+func HandleGVisorOutgoingPacket(data []byte) error {
+	// 解析以太网帧
+	if len(data) < 14 {
+		return nil // 太短，不是有效的以太网帧
+	}
+
+	// 检查是否是 IPv4 包
+	etherType := uint16(data[12])<<8 | uint16(data[13])
+	if etherType != 0x0800 {
+		return nil // 不是 IPv4 包
+	}
+
+	// 提取 IP 包
+	ipPacket := data[14:]
+	if len(ipPacket) < 20 {
+		return nil // IP 头部太短
+	}
+
+	// 解析 IP 头部
+	srcIP := net.IP(ipPacket[12:16])
+	dstIP := net.IP(ipPacket[16:20])
+	protocol := ipPacket[9]
+
+	// 检查是否需要 VXLAN 封装
+	vni, needsVXLAN := getVNIForDestination(srcIP, dstIP)
+	if !needsVXLAN {
+		return nil // 不需要 VXLAN 封装，正常发送
+	}
+
+	// 解析传输层端口
+	var srcPort, dstPort uint16
+	transportOffset := int(ipPacket[0]&0x0F) * 4
+	if len(ipPacket) > transportOffset+4 {
+		srcPort = uint16(ipPacket[transportOffset])<<8 | uint16(ipPacket[transportOffset+1])
+		dstPort = uint16(ipPacket[transportOffset+2])<<8 | uint16(ipPacket[transportOffset+3])
+	}
+
+	// 获取 VXLAN 处理器
 	vxlanHandlerMutex.RLock()
 	listener, exists := vxlanHandlers[vni]
 	vxlanHandlerMutex.RUnlock()
 
-	if exists && !listener.closed {
-		// 创建新的连接或将数据发送到现有连接
-		// 使用解封装得到的内层网络信息
-		protocolStr := "udp"
-		switch protocol {
-		case layers.IPProtocolTCP:
-			protocolStr = "tcp"
-		case layers.IPProtocolICMPv4:
-			protocolStr = "icmp"
-		}
-
-		remoteAddr := &VXLANAddr{
-			IP:       innerSrcIP,        // 远程内层 IP
-			Port:     int(innerSrcPort), // 远程内层端口
-			VNI:      vni,               // VXLAN 网络标识
-			Protocol: protocolStr,       // 协议类型
-		}
-
-		conn := &VXLANConn{
-			localAddr:  listener.addr,
-			remoteAddr: remoteAddr,
-			handler:    listener.handler,
-			readChan:   make(chan []byte, 100),
-			writeChan:  make(chan []byte, 100),
-			closed:     false,
-		}
-
-		// 将解封装的数据发送到连接的读取通道
-		select {
-		case conn.readChan <- innerPayload:
-		default:
-			// 通道满，丢弃数据
-		}
-
-		// 尝试将连接发送到监听器
-		select {
-		case listener.acceptCh <- conn:
-		default:
-			// 接受队列满，丢弃连接
-		}
+	if !exists {
+		log.Printf("[DEBUG] No VXLAN handler for VNI %d", vni)
+		return nil
 	}
+
+	// 使用监听器的处理器进行 VXLAN 封装
+	vxlanPacket, err := listener.handler.EncapsulateVXLAN(
+		ipPacket, srcIP, dstIP, srcPort, dstPort, layers.IPProtocol(protocol))
+	if err != nil {
+		log.Printf("[ERROR] VXLAN encapsulation failed: %v", err)
+		return err
+	}
+
+	// 通过 DPDK 发送 VXLAN 包
+	if err := SendRawBytes(vxlanPacket); err != nil {
+		log.Printf("[ERROR] Failed to send VXLAN packet via DPDK: %v", err)
+		return err
+	}
+
+	log.Printf("[DEBUG] VXLAN packet sent: src=%s:%d, dst=%s:%d, VNI=%d",
+		srcIP, srcPort, dstIP, dstPort, vni)
+
+	// 返回特殊错误，表示包已经被处理
+	return ErrVXLANPacketHandled
 }
