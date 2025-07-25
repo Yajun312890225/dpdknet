@@ -187,19 +187,15 @@ func getLocalMAC() net.HardwareAddr {
 	return mac
 }
 
-// generateRemoteMAC 生成或获取远程 MAC 地址
 // getRemoteMACFromARP 通过 ARP 表获取远程 MAC 地址
 func getRemoteMACFromARP(remoteIP net.IP) net.HardwareAddr {
-	// 仅支持 Linux，macOS 可用 arp 命令
-	// 这里用 shell 调用 arp 命令解析
 	ipStr := remoteIP.String()
 	out, err := execCommand("arp", []string{"-n", ipStr})
 	if err != nil {
 		log.Printf("[WARN] ARP 查询失败: %v", err)
-		return nil
+		// 查询失败时，返回广播 MAC，防止 nil
+		return net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 	}
-	// 解析输出，提取 MAC
-	// macOS arp 输出: ? (192.168.66.115) at 00:50:56:ab:cd:ef on en0 ifscope [ethernet]
 	fields := strings.Fields(out)
 	for i, f := range fields {
 		if f == "at" && i+1 < len(fields) {
@@ -210,8 +206,8 @@ func getRemoteMACFromARP(remoteIP net.IP) net.HardwareAddr {
 			}
 		}
 	}
-	log.Printf("[WARN] 未找到 ARP MAC, IP: %s", ipStr)
-	return nil
+	log.Printf("[WARN] 未找到 ARP MAC, IP: %s，使用广播 MAC", ipStr)
+	return net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 }
 
 // execCommand 执行命令并返回输出
