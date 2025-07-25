@@ -11,13 +11,13 @@ import (
 
 func main() {
 	// 示例1: TCP 服务器带 VXLAN 封装 (新的可变参数方式)
-	tcpServerExample()
+	// tcpServerExample()
 
 	// 示例2: UDP 服务器带 VXLAN 封装
 	// udpServerExample()
 
 	// 示例3: TCP 客户端带 VXLAN 封装
-	// tcpClientExample()
+	tcpClientExample()
 
 	// 示例4: ICMP 客户端带 VXLAN 封装 (TODO: 实现)
 	// icmpClientExample()
@@ -111,11 +111,11 @@ func tcpClientExample() {
 	// 创建 VXLAN 配置
 	vxlanConfig := &dpdknet.VXLANConfig{
 		VNI:       1000,
-		LocalIP:   net.ParseIP("192.168.1.20"), // 客户端 VTEP IP
-		RemoteIP:  net.ParseIP("192.168.1.10"), // 服务器 VTEP IP
-		UDPPort:   4789,
-		LocalMAC:  net.HardwareAddr{0x00, 0x66, 0x77, 0x88, 0x99, 0xaa},
-		RemoteMAC: net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55},
+		LocalIP:   net.ParseIP("11.74.225.249"), // 本地 VTEP IP
+		RemoteIP:  net.ParseIP("10.64.12.7"),    // 远程 VTEP IP
+		UDPPort:   4789,                         // VXLAN 端口
+		LocalMAC:  net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55},
+		RemoteMAC: net.HardwareAddr{0x00, 0x66, 0x77, 0x88, 0x99, 0xaa},
 	}
 
 	// 使用新的 Option 风格
