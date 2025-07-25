@@ -6,6 +6,7 @@ toolchain go1.24.2
 
 require (
 	github.com/Yajun312890225/nff-go v0.0.0-20250721065636-ec27cf0d3b42
+	github.com/google/gopacket v1.1.19
 	gvisor.dev/gvisor v0.0.0-20250205023644-9414b50a5633
 )
 

@@ -138,6 +138,12 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 		return
 	}
 
+	// 检查是否为 VXLAN 包
+	if IsVXLANPacket(data) {
+		handleIncomingVXLANPacket(data)
+		return
+	}
+
 	// 首先尝试通过 gVisor netstack 处理
 	if gvisor := GetGVisorNetstack(); gvisor != nil {
 		// 注入到 gVisor netstack 进行协议栈处理

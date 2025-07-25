@@ -1,8 +1,6 @@
-module tcpserver
+module vxlan-example
 
 go 1.23.1
-
-toolchain go1.24.2
 
 require github.com/Yajun312890225/dpdknet v0.0.0
 
@@ -17,5 +15,3 @@ require (
 )
 
 replace github.com/Yajun312890225/dpdknet => ../../
-
-replace github.com/Yajun312890225/nff-go => ../../../nff-go

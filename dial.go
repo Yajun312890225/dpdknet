@@ -21,6 +21,12 @@ func Dial(network, address string) (net.Conn, error) {
 			return nil, err
 		}
 		return DialUDP(network, nil, addr)
+	case "vxlan":
+		addr, err := ParseVXLANAddr(address)
+		if err != nil {
+			return nil, err
+		}
+		return DialVXLAN(network, nil, addr)
 	default:
 		return nil, errors.New("unsupported network type: " + network)
 	}
@@ -37,6 +43,9 @@ func DialTimeout(network, address string, timeout time.Duration) (net.Conn, erro
 		return DialTCPTimeout(network, nil, addr, timeout)
 	case "udp", "udp4", "udp6":
 		// UDP是无连接的，超时对建立连接没有意义，直接调用Dial
+		return Dial(network, address)
+	case "vxlan":
+		// VXLAN 基于 UDP，超时处理类似 UDP
 		return Dial(network, address)
 	default:
 		return nil, errors.New("unsupported network type: " + network)

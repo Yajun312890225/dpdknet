@@ -14,6 +14,12 @@ func Listen(network, address string) (net.Listener, error) {
 			return nil, err
 		}
 		return ListenTCP(network, addr)
+	case "vxlan":
+		addr, err := ParseVXLANAddr(address)
+		if err != nil {
+			return nil, err
+		}
+		return ListenVXLAN(network, addr)
 	default:
 		return nil, errors.New("unsupported network type: " + network)
 	}
