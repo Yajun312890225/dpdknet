@@ -358,6 +358,7 @@ func (vh *VXLANHandler) GetConfig() *VXLANConfig {
 	return vh.config
 }
 
+// -------------------- VXLAN 包处理入口 --------------------
 // handleIncomingVXLANPacket 处理传入的 VXLAN 包
 func handleIncomingVXLANPacket(data []byte) {
 	// 检查是否为 VXLAN 包
@@ -387,7 +388,9 @@ func handleIncomingVXLANPacket(data []byte) {
 	}
 }
 
-// 保存 VNI 映射信息，用于回程封装
+// constructInnerIPPacket 构建内层 IP 包
+
+// -------------------- VXLAN VNI 映射相关 --------------------
 var (
 	vniMappings     = make(map[string]uint32) // IP对 -> VNI
 	vniMappingMutex sync.RWMutex
@@ -410,7 +413,7 @@ func getVNIForDestination(srcIP, dstIP net.IP) (uint32, bool) {
 	return vni, exists
 }
 
-// constructInnerIPPacket 构建内层 IP 包
+// -------------------- VXLAN 核心处理方法 --------------------
 func constructInnerIPPacket(payload []byte, srcIP, dstIP net.IP, srcPort, dstPort uint16, protocol layers.IPProtocol) []byte {
 	// 创建以太网帧
 	ethLayer := &layers.Ethernet{
