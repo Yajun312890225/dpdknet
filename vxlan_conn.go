@@ -19,11 +19,11 @@ type VXLANConn struct {
 	mu         sync.RWMutex
 }
 
-// VXLANAddr VXLAN 地址
+// VXLANAddr VXLAN 地址 - 表示内层虚拟网络地址
 type VXLANAddr struct {
-	IP   net.IP
-	Port int
-	VNI  uint32
+	IP   net.IP // 内层虚拟 IP（应用层地址）
+	Port int    // 内层端口（应用层端口）
+	VNI  uint32 // VXLAN Network Identifier
 }
 
 func (va *VXLANAddr) Network() string {
@@ -102,14 +102,18 @@ func DialVXLAN(network string, localAddr, remoteAddr *VXLANAddr) (*VXLANConn, er
 		return nil, fmt.Errorf("failed to initialize DPDK network: %v", err)
 	}
 
-	// 创建 VXLAN 配置
+	// 从环境变量获取外层 VTEP 地址
+	localVTEP := getLocalIPFromEnv()
+	remoteVTEP := getRemoteVTEPFromEnv() // 需要新增这个函数
+
+	// 创建 VXLAN 配置 - 外层是 VTEP 地址，内层是 VXLANAddr
 	config := &VXLANConfig{
 		VNI:       remoteAddr.VNI,
-		LocalIP:   getLocalIPFromEnv(),
-		RemoteIP:  remoteAddr.IP,
-		UDPPort:   uint16(remoteAddr.Port),
+		LocalIP:   localVTEP,  // 外层本地 VTEP IP
+		RemoteIP:  remoteVTEP, // 外层远程 VTEP IP
+		UDPPort:   4789,       // 外层 VXLAN UDP 端口固定 4789
 		LocalMAC:  getLocalMAC(),
-		RemoteMAC: getRemoteMACFromARP(remoteAddr.IP),
+		RemoteMAC: getRemoteMACFromARP(remoteVTEP), // 基于 VTEP IP 查询 MAC
 	}
 
 	vxlanConn := &VXLANConn{
@@ -130,8 +134,8 @@ func DialVXLAN(network string, localAddr, remoteAddr *VXLANAddr) (*VXLANConn, er
 	// 启动 VXLAN 包处理 goroutine
 	go vxlanConn.startPacketProcessor()
 
-	log.Printf("[INFO] VXLAN connection established: local=%s, remote=%s, VNI=%d",
-		config.LocalIP, config.RemoteIP, config.VNI)
+	log.Printf("[INFO] VXLAN connection established: local_vtep=%s, remote_vtep=%s, inner_local=%s, inner_remote=%s, VNI=%d",
+		localVTEP, remoteVTEP, localAddr, remoteAddr, config.VNI)
 
 	return vxlanConn, nil
 }
@@ -283,13 +287,16 @@ func ListenVXLAN(network string, addr *VXLANAddr) (*VXLANListener, error) {
 		return nil, fmt.Errorf("failed to initialize DPDK network: %v", err)
 	}
 
-	// 创建 VXLAN 配置
+	// 从环境变量获取本地 VTEP 地址（外层）
+	localVTEP := getLocalIPFromEnv()
+
+	// 创建 VXLAN 配置 - addr 是内层地址，VTEP 是外层地址
 	config := &VXLANConfig{
 		VNI:       addr.VNI,
-		LocalIP:   getLocalIPFromEnv(),
-		UDPPort:   uint16(addr.Port),
+		LocalIP:   localVTEP, // 外层本地 VTEP IP
+		UDPPort:   4789,      // 外层固定端口 4789
 		LocalMAC:  getLocalMAC(),
-		RemoteMAC: getRemoteMACFromARP(addr.IP),
+		RemoteMAC: nil, // 监听器不需要远程 MAC
 	}
 
 	listener := &VXLANListener{
@@ -302,7 +309,7 @@ func ListenVXLAN(network string, addr *VXLANAddr) (*VXLANListener, error) {
 	// 注册 VXLAN 处理器到全局包处理器
 	registerVXLANHandler(addr.VNI, listener)
 
-	log.Printf("[INFO] VXLAN listener started: addr=%s, VNI=%d", addr, addr.VNI)
+	log.Printf("[INFO] VXLAN listener started: vtep=%s, inner_addr=%s, VNI=%d", localVTEP, addr, addr.VNI)
 	return listener, nil
 }
 

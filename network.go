@@ -42,6 +42,18 @@ func getLocalIPFromEnv() net.IP {
 	return net.IPv4(192, 168, 66, 57)
 }
 
+// getRemoteVTEPFromEnv 从环境变量获取远程 VTEP IP地址
+func getRemoteVTEPFromEnv() net.IP {
+	if ipStr := os.Getenv("DPDKNET_REMOTE_VTEP"); ipStr != "" {
+		if ip := net.ParseIP(ipStr); ip != nil {
+			return ip.To4()
+		}
+		log.Printf("[WARNING] Invalid IP address in DPDKNET_REMOTE_VTEP: %s, using default", ipStr)
+	}
+	// 默认远程 VTEP IP地址
+	return net.IPv4(192, 168, 66, 115)
+}
+
 // EnsureGlobalNetworkInit 确保全局网络系统只初始化一次
 func EnsureGlobalNetworkInit() error {
 	globalNetworkOnce.Do(func() {

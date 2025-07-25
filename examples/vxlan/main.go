@@ -10,6 +10,21 @@ import (
 	"github.com/Yajun312890225/dpdknet"
 )
 
+// VXLAN 示例程序
+//
+// 环境变量配置:
+// - DPDKNET_LOCAL_IP: 本地 VTEP IP 地址 (外层隧道地址)
+// - DPDKNET_REMOTE_VTEP: 远程 VTEP IP 地址 (外层隧道地址)
+//
+// VXLAN 地址说明:
+// - VXLANAddr.IP: 内层虚拟网络 IP (应用层地址，如 10.0.1.x)
+// - VXLANAddr.Port: 内层应用端口 (应用层端口，如 8080)
+// - VXLANAddr.VNI: VXLAN 网络标识符
+//
+// 例如:
+// export DPDKNET_LOCAL_IP=192.168.66.57    # 本地物理机 IP
+// export DPDKNET_REMOTE_VTEP=192.168.66.115 # 远程物理机 IP
+
 func main() {
 	log.Printf("Starting VXLAN example with DPDK integration...")
 
@@ -24,21 +39,22 @@ func main() {
 }
 
 func runVXLANServer() {
-	// 创建 VXLAN 地址
+	// 创建内层 VXLAN 地址（虚拟网络中的地址）
 	vxlanAddr := &dpdknet.VXLANAddr{
-		IP:   net.ParseIP("192.168.1.100"),
-		Port: 4789,
-		VNI:  1000,
+		IP:   net.ParseIP("10.0.1.100"), // 内层虚拟 IP
+		Port: 8080,                      // 内层应用端口
+		VNI:  1000,                      // VXLAN 网络标识
 	}
 
 	// 监听 VXLAN 连接 (基于 DPDK)
+	// 外层 VTEP 地址通过环境变量 DPDKNET_LOCAL_IP 配置
 	listener, err := dpdknet.ListenVXLAN("vxlan", vxlanAddr)
 	if err != nil {
 		log.Fatalf("Failed to listen on VXLAN: %v", err)
 	}
 	defer listener.Close()
 
-	log.Printf("VXLAN server listening on %s (DPDK mode)", listener.Addr())
+	log.Printf("VXLAN server listening on inner address %s (DPDK mode)", listener.Addr())
 
 	for {
 		conn, err := listener.Accept()
@@ -47,7 +63,7 @@ func runVXLANServer() {
 			continue
 		}
 
-		log.Printf("New VXLAN connection from %s", conn.RemoteAddr())
+		log.Printf("New VXLAN connection from inner address %s", conn.RemoteAddr())
 		go handleVXLANConnection(conn)
 	}
 }
@@ -87,21 +103,31 @@ func handleVXLANConnection(conn net.Conn) {
 }
 
 func runVXLANClient() {
-	// 创建远程 VXLAN 地址
+	// 创建远程内层 VXLAN 地址（目标虚拟网络地址）
 	remoteAddr := &dpdknet.VXLANAddr{
-		IP:   net.ParseIP("192.168.66.115"),
-		Port: 4789,
-		VNI:  1000,
+		IP:   net.ParseIP("10.0.1.100"), // 内层目标虚拟 IP
+		Port: 8080,                      // 内层目标应用端口
+		VNI:  1000,                      // VXLAN 网络标识
+	}
+
+	// 本地内层地址（可选）
+	localAddr := &dpdknet.VXLANAddr{
+		IP:   net.ParseIP("10.0.1.200"), // 内层本地虚拟 IP
+		Port: 8081,                      // 内层本地应用端口
+		VNI:  1000,                      // VXLAN 网络标识
 	}
 
 	// 连接到 VXLAN 服务器 (通过 DPDK)
-	conn, err := dpdknet.DialVXLAN("vxlan", nil, remoteAddr)
+	// 外层 VTEP 地址通过环境变量配置：
+	// DPDKNET_LOCAL_IP: 本地 VTEP IP
+	// DPDKNET_REMOTE_VTEP: 远程 VTEP IP
+	conn, err := dpdknet.DialVXLAN("vxlan", localAddr, remoteAddr)
 	if err != nil {
 		log.Fatalf("Failed to dial VXLAN: %v", err)
 	}
 	defer conn.Close()
 
-	log.Printf("Connected to VXLAN server at %s (DPDK mode)", conn.RemoteAddr())
+	log.Printf("Connected to VXLAN server at inner address %s (DPDK mode)", conn.RemoteAddr())
 
 	// 发送消息
 	message := "Hello VXLAN World via DPDK!"
