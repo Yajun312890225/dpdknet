@@ -14,10 +14,10 @@ func main() {
 	tcpServerExample()
 
 	// 示例2: UDP 服务器带 VXLAN 封装
-	udpServerExample()
+	// udpServerExample()
 
 	// 示例3: TCP 客户端带 VXLAN 封装
-	tcpClientExample()
+	// tcpClientExample()
 
 	// 示例4: ICMP 客户端带 VXLAN 封装 (TODO: 实现)
 	// icmpClientExample()
@@ -29,9 +29,9 @@ func tcpServerExample() {
 	// 创建 VXLAN 配置
 	vxlanConfig := &dpdknet.VXLANConfig{
 		VNI:       1000,
-		LocalIP:   net.ParseIP("192.168.1.10"), // 本地 VTEP IP
-		RemoteIP:  net.ParseIP("192.168.1.20"), // 远程 VTEP IP
-		UDPPort:   4789,                        // VXLAN 端口
+		LocalIP:   net.ParseIP("11.74.225.249"), // 本地 VTEP IP
+		RemoteIP:  net.ParseIP("10.64.12.7"),    // 远程 VTEP IP
+		UDPPort:   4789,                         // VXLAN 端口
 		LocalMAC:  net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55},
 		RemoteMAC: net.HardwareAddr{0x00, 0x66, 0x77, 0x88, 0x99, 0xaa},
 	}
@@ -48,20 +48,20 @@ func tcpServerExample() {
 		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 
 	// 接受连接（在真实应用中，这里会有循环处理）
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				log.Printf("Accept error: %v", err)
-				continue
-			}
-
-			// 处理连接
-			go handleTCPConnection(conn)
+	// go func() {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			log.Printf("Accept error: %v", err)
+			continue
 		}
-	}()
 
-	time.Sleep(1 * time.Second) // 让服务器运行一会儿
+		// 处理连接
+		go handleTCPConnection(conn)
+	}
+	// }()
+
+	// time.S`leep(1 * time.Second) // 让服务器运行一会儿
 }
 
 func udpServerExample() {
