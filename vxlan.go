@@ -38,7 +38,7 @@ func NewVXLANHandler(config *VXLANConfig) *VXLANHandler {
 		config = DefaultVXLANConfig()
 	}
 	return &VXLANHandler{
-		config: config,
+		config:  config,
 	}
 }
 
@@ -70,7 +70,7 @@ func (vh *VXLANHandler) EncapsulateVXLAN(innerPayload []byte, innerEthSrc, inner
 
 	// 3. 构建外层 UDP 头
 	udpLayer := &layers.UDP{
-		SrcPort: layers.UDPPort(4789), // 源端口也使用 VXLAN 端口
+		SrcPort: layers.UDPPort(10000 + uint16((vh.config.VNI)%55535)), // 简单随机，实际可用更复杂算法
 		DstPort: layers.UDPPort(vh.config.UDPPort),
 	}
 	udpLayer.SetNetworkLayerForChecksum(ipLayer)
