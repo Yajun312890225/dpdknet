@@ -7,12 +7,20 @@ import (
 )
 
 // Dial connects to the address on the named network.
-func Dial(network, address string) (net.Conn, error) {
+func Dial(network, address string, options ...*VXLANConfig) (net.Conn, error) {
+	var vxlanConfig *VXLANConfig
+	if len(options) > 0 {
+		vxlanConfig = options[0]
+	}
+
 	switch network {
 	case "tcp", "tcp4", "tcp6":
 		addr, err := ResolveTCPAddr(network, address)
 		if err != nil {
 			return nil, err
+		}
+		if vxlanConfig != nil {
+			return DialTCPWithVXLAN(network, nil, addr, vxlanConfig)
 		}
 		return DialTCP(network, nil, addr)
 	case "udp", "udp4", "udp6":
@@ -21,15 +29,25 @@ func Dial(network, address string) (net.Conn, error) {
 			return nil, err
 		}
 		return DialUDP(network, nil, addr)
-	case "vxlan":
-		addr, err := ParseVXLANAddr(address)
+	case "icmp", "icmp4", "icmp6":
+		addr, err := net.ResolveIPAddr(network, address)
 		if err != nil {
 			return nil, err
 		}
-		return DialVXLAN(network, nil, addr)
+		// ICMP 不直接实现 net.Conn，需要特殊处理
+		conn, err := DialICMPWithVXLAN(addr, vxlanConfig)
+		if err != nil {
+			return nil, err
+		}
+		return &ICMPConnAdapter{conn: conn}, nil
 	default:
 		return nil, errors.New("unsupported network type: " + network)
 	}
+}
+
+// DialWithOptions connects to the address on the named network with options.
+func DialWithOptions(network, address string, vxlanConfig *VXLANConfig) (net.Conn, error) {
+	return Dial(network, address, vxlanConfig)
 }
 
 // DialTimeout acts like Dial but takes a timeout.
@@ -116,4 +134,16 @@ func DialUDP(network string, laddr, raddr *UDPAddr) (*UDPConn, error) {
 	}
 	conn.remoteAddr = raddr
 	return conn, nil
+}
+
+// DialICMPWithVXLAN creates an ICMP connection with optional VXLAN encapsulation.
+func DialICMPWithVXLAN(raddr *net.IPAddr, vxlanConfig *VXLANConfig) (*ICMPConn, error) {
+	var localIP net.IP
+	if vxlanConfig != nil {
+		localIP = vxlanConfig.LocalIP
+	} else {
+		localIP = getLocalIPFromEnv()
+	}
+
+	return NewICMPConnWithVXLAN(localIP, vxlanConfig)
 }

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/gopacket/layers"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -48,6 +49,10 @@ type GVisorNetstack struct {
 
 	// 作为 DPDK 的链路层处理器
 	packetHandler func([]byte) error
+
+	// VXLAN 连接注册
+	vxlanConnections map[string]*VXLANConfig // key: "localIP:localPort", value: VXLAN config
+	vxlanMutex       sync.RWMutex
 }
 
 // GVisorStats gVisor 协议栈统计信息
@@ -126,13 +131,14 @@ func newGVisorNetstack(localIP net.IP, localMAC [6]byte, subnetMask net.IPMask) 
 	}
 
 	gvs := &GVisorNetstack{
-		stack:      s,
-		linkEP:     linkEP,
-		localIP:    localIP.To4(),
-		localMAC:   localMAC,
-		subnetMask: subnetMask,
-		stopCh:     make(chan struct{}),
-		dpdkCh:     make(chan []byte, 10000), // 大容量缓冲区
+		stack:            s,
+		linkEP:           linkEP,
+		localIP:          localIP.To4(),
+		localMAC:         localMAC,
+		subnetMask:       subnetMask,
+		stopCh:           make(chan struct{}),
+		dpdkCh:           make(chan []byte, 10000),      // 大容量缓冲区
+		vxlanConnections: make(map[string]*VXLANConfig), // 初始化 VXLAN 连接映射
 	}
 
 	return gvs, nil
@@ -194,6 +200,35 @@ func (gvs *GVisorNetstack) InjectDPDKPacket(data []byte) {
 	default:
 		gvs.stats.PacketsDropped++
 	}
+}
+
+// RegisterVXLANConnection 注册 VXLAN 连接配置
+func (gvs *GVisorNetstack) RegisterVXLANConnection(localIP net.IP, localPort uint16, config *VXLANConfig) {
+	gvs.vxlanMutex.Lock()
+	defer gvs.vxlanMutex.Unlock()
+
+	key := fmt.Sprintf("%s:%d", localIP.String(), localPort)
+	gvs.vxlanConnections[key] = config
+	log.Printf("[DEBUG] Registered VXLAN connection: %s with VNI %d", key, config.VNI)
+}
+
+// UnregisterVXLANConnection 取消注册 VXLAN 连接配置
+func (gvs *GVisorNetstack) UnregisterVXLANConnection(localIP net.IP, localPort uint16) {
+	gvs.vxlanMutex.Lock()
+	defer gvs.vxlanMutex.Unlock()
+
+	key := fmt.Sprintf("%s:%d", localIP.String(), localPort)
+	delete(gvs.vxlanConnections, key)
+	log.Printf("[DEBUG] Unregistered VXLAN connection: %s", key)
+}
+
+// FindVXLANConfig 查找端口对应的 VXLAN 配置
+func (gvs *GVisorNetstack) FindVXLANConfig(localIP net.IP, localPort uint16) *VXLANConfig {
+	gvs.vxlanMutex.RLock()
+	defer gvs.vxlanMutex.RUnlock()
+
+	key := fmt.Sprintf("%s:%d", localIP.String(), localPort)
+	return gvs.vxlanConnections[key]
 }
 
 // dpdkPacketProcessor 处理来自 DPDK 的数据包
@@ -333,15 +368,16 @@ func (gvs *GVisorNetstack) sendPacketToDPDK(pkt *stack.PacketBuffer) {
 	copy(frame[14:], payloadBytes)
 
 	// 检查是否需要 VXLAN 封装
-	err := HandleGVisorOutgoingPacket(frame)
-	if err == ErrVXLANPacketHandled {
-		// 包已经被 VXLAN 处理并发送，更新统计并返回
-		gvs.stats.PacketsSent++
-		return
-	} else if err != nil {
-		// 其他错误
-		log.Printf("[ERROR] Failed to handle VXLAN outgoing packet: %v", err)
-		gvs.stats.PacketsDropped++
+	vxlanConfig := gvs.checkNeedVXLANEncapsulation(payloadBytes)
+	if vxlanConfig != nil {
+		// 需要 VXLAN 封装，调用专门的处理函数
+		err := gvs.handleVXLANOutgoingPacket(frame, vxlanConfig)
+		if err != nil {
+			log.Printf("[ERROR] Failed to handle VXLAN outgoing packet: %v", err)
+			gvs.stats.PacketsDropped++
+		} else {
+			gvs.stats.PacketsSent++
+		}
 		return
 	}
 
@@ -352,6 +388,134 @@ func (gvs *GVisorNetstack) sendPacketToDPDK(pkt *stack.PacketBuffer) {
 	} else {
 		gvs.stats.PacketsSent++
 	}
+}
+
+// checkNeedVXLANEncapsulation 检查数据包是否需要 VXLAN 封装
+func (gvs *GVisorNetstack) checkNeedVXLANEncapsulation(ipPacket []byte) *VXLANConfig {
+	if len(ipPacket) < 20 {
+		return nil // IP 包太短
+	}
+
+	// 解析 IP 头部
+	protocol := ipPacket[9]
+
+	var srcPort, dstPort uint16
+
+	// 根据协议提取端口信息
+	switch protocol {
+	case 6: // TCP
+		if len(ipPacket) < 24 {
+			return nil
+		}
+		ipHeaderLen := (ipPacket[0] & 0x0F) * 4
+		if len(ipPacket) < int(ipHeaderLen)+4 {
+			return nil
+		}
+		srcPort = uint16(ipPacket[ipHeaderLen])<<8 | uint16(ipPacket[ipHeaderLen+1])
+		dstPort = uint16(ipPacket[ipHeaderLen+2])<<8 | uint16(ipPacket[ipHeaderLen+3])
+
+	case 17: // UDP
+		if len(ipPacket) < 28 {
+			return nil
+		}
+		ipHeaderLen := (ipPacket[0] & 0x0F) * 4
+		if len(ipPacket) < int(ipHeaderLen)+4 {
+			return nil
+		}
+		srcPort = uint16(ipPacket[ipHeaderLen])<<8 | uint16(ipPacket[ipHeaderLen+1])
+		dstPort = uint16(ipPacket[ipHeaderLen+2])<<8 | uint16(ipPacket[ipHeaderLen+3])
+
+	case 1: // ICMP
+		// ICMP 没有端口概念，使用特殊端口号 0
+		srcPort = 0
+		dstPort = 0
+
+	default:
+		return nil // 其他协议暂不支持
+	} // 检查源端口是否注册了 VXLAN 配置
+	srcIP := net.IP(ipPacket[12:16])
+	if config := gvs.FindVXLANConfig(srcIP, srcPort); config != nil {
+		return config
+	}
+
+	// 检查目标端口是否注册了 VXLAN 配置
+	dstIP := net.IP(ipPacket[16:20])
+	if config := gvs.FindVXLANConfig(dstIP, dstPort); config != nil {
+		return config
+	}
+
+	return nil
+}
+
+// handleVXLANOutgoingPacket 处理需要 VXLAN 封装的输出数据包
+func (gvs *GVisorNetstack) handleVXLANOutgoingPacket(frame []byte, vxlanConfig *VXLANConfig) error {
+	if len(frame) < 14 {
+		return fmt.Errorf("frame too short for ethernet header")
+	}
+
+	// 提取内层以太网帧（去掉外层以太网头）
+	innerFrame := frame[14:]
+
+	// 创建 VXLAN 处理器
+	handler := NewVXLANHandler(vxlanConfig)
+
+	// 解析内层 IP 包信息
+	if len(innerFrame) < 20 {
+		return fmt.Errorf("inner frame too short for IP header")
+	}
+
+	srcIP := net.IP(innerFrame[12:16])
+	dstIP := net.IP(innerFrame[16:20])
+	protocol := innerFrame[9]
+
+	var srcPort, dstPort uint16
+	ipHeaderLen := (innerFrame[0] & 0x0F) * 4
+
+	if protocol == 6 || protocol == 17 { // TCP 或 UDP
+		if len(innerFrame) >= int(ipHeaderLen)+4 {
+			srcPort = uint16(innerFrame[ipHeaderLen])<<8 | uint16(innerFrame[ipHeaderLen+1])
+			dstPort = uint16(innerFrame[ipHeaderLen+2])<<8 | uint16(innerFrame[ipHeaderLen+3])
+		}
+	} else if protocol == 1 { // ICMP
+		// ICMP 没有端口概念，使用 0
+		srcPort = 0
+		dstPort = 0
+	}
+
+	// 使用 VXLAN 处理器进行封装
+	var vxlanPacket []byte
+	var err error
+
+	if protocol == 6 { // TCP
+		vxlanPacket, err = handler.EncapsulateVXLAN(
+			innerFrame, srcIP, dstIP, srcPort, dstPort,
+			layers.IPProtocolTCP,
+		)
+	} else if protocol == 17 { // UDP
+		vxlanPacket, err = handler.EncapsulateVXLAN(
+			innerFrame, srcIP, dstIP, srcPort, dstPort,
+			layers.IPProtocolUDP,
+		)
+	} else if protocol == 1 { // ICMP
+		vxlanPacket, err = handler.EncapsulateVXLAN(
+			innerFrame, srcIP, dstIP, srcPort, dstPort,
+			layers.IPProtocolICMPv4,
+		)
+	} else {
+		return fmt.Errorf("unsupported protocol for VXLAN: %d", protocol)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to encapsulate VXLAN: %v", err)
+	}
+
+	// 发送 VXLAN 封装后的数据包
+	if err := SendRawBytes(vxlanPacket); err != nil {
+		return fmt.Errorf("failed to send VXLAN packet: %v", err)
+	}
+
+	log.Printf("[DEBUG] Sent VXLAN packet with VNI %d, size %d", vxlanConfig.VNI, len(vxlanPacket))
+	return nil
 }
 
 // getRemoteVTEPForDestination 获取目标 IP 对应的远程 VTEP

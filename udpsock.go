@@ -17,6 +17,10 @@ type UDPConn struct {
 
 	// gVisor 集成
 	gvisorConn net.PacketConn // gVisor UDP 连接
+
+	// VXLAN 选项
+	vxlanConfig  *VXLANConfig // 如果不为 nil，则启用 VXLAN 封装
+	vxlanHandler *VXLANHandler
 }
 
 func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
@@ -40,6 +44,32 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 	c.gvisorConn = gvisorConn
 
 	return c, nil
+}
+
+// ListenUDPWithVXLAN 创建带 VXLAN 封装的 UDP 连接
+func ListenUDPWithVXLAN(network string, laddr *UDPAddr, vxlanConfig *VXLANConfig) (*UDPConn, error) {
+	conn, err := ListenUDP(network, laddr)
+	if err != nil {
+		return nil, err
+	}
+
+	if vxlanConfig != nil {
+		conn.vxlanConfig = vxlanConfig
+		conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
+
+		// 在全局网络栈中注册这个 VXLAN 连接
+		if globalGVisorStack != nil {
+			globalGVisorStack.RegisterVXLANConnection(
+				net.ParseIP("0.0.0.0"), // 监听所有接口
+				uint16(laddr.Port),
+				vxlanConfig,
+			)
+		}
+
+		log.Printf("[INFO] UDP connection enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
+	}
+
+	return conn, nil
 }
 
 func (c *UDPConn) ReadFromUDP(buf []byte) (int, *UDPAddr, error) {

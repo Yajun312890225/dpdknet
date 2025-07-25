@@ -17,6 +17,10 @@ type TCPConn struct {
 
 	// gVisor 集成
 	gvisorConn net.Conn // gVisor TCP 连接
+
+	// VXLAN 选项
+	vxlanConfig  *VXLANConfig // 如果不为 nil，则启用 VXLAN 封装
+	vxlanHandler *VXLANHandler
 }
 
 type TCPListener struct {
@@ -26,6 +30,10 @@ type TCPListener struct {
 
 	// gVisor 集成
 	gvisorListener net.Listener // gVisor TCP 监听器
+
+	// VXLAN 选项
+	vxlanConfig  *VXLANConfig // 如果不为 nil，则启用 VXLAN 封装
+	vxlanHandler *VXLANHandler
 }
 
 func ListenTCP(network string, laddr *TCPAddr) (*TCPListener, error) {
@@ -51,6 +59,32 @@ func ListenTCP(network string, laddr *TCPAddr) (*TCPListener, error) {
 	return listener, nil
 }
 
+// ListenTCPWithVXLAN 创建带 VXLAN 封装的 TCP 监听器
+func ListenTCPWithVXLAN(network string, laddr *TCPAddr, vxlanConfig *VXLANConfig) (*TCPListener, error) {
+	listener, err := ListenTCP(network, laddr)
+	if err != nil {
+		return nil, err
+	}
+
+	if vxlanConfig != nil {
+		listener.vxlanConfig = vxlanConfig
+		listener.vxlanHandler = NewVXLANHandler(vxlanConfig)
+
+		// 在全局网络栈中注册这个 VXLAN 连接
+		if globalGVisorStack != nil {
+			globalGVisorStack.RegisterVXLANConnection(
+				net.ParseIP("0.0.0.0"), // 监听所有接口
+				uint16(laddr.Port),
+				vxlanConfig,
+			)
+		}
+
+		log.Printf("[INFO] TCP listener enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
+	}
+
+	return listener, nil
+}
+
 func (l *TCPListener) Accept() (net.Conn, error) {
 	l.mu.Lock()
 	if l.closed {
@@ -71,8 +105,10 @@ func (l *TCPListener) Accept() (net.Conn, error) {
 
 	// 包装为 TCPConn
 	tcpConn := &TCPConn{
-		localAddr:  l.localAddr,
-		gvisorConn: gvisorConn,
+		localAddr:    l.localAddr,
+		gvisorConn:   gvisorConn,
+		vxlanConfig:  l.vxlanConfig,  // 传递 VXLAN 配置
+		vxlanHandler: l.vxlanHandler, // 传递 VXLAN 处理器
 	}
 
 	// 尝试获取远程地址
@@ -178,6 +214,22 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 	}
 
 	return tcpConn, nil
+}
+
+// DialTCPWithVXLAN 创建带 VXLAN 封装的 TCP 连接
+func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr, vxlanConfig *VXLANConfig) (*TCPConn, error) {
+	conn, err := DialTCP(network, laddr, raddr)
+	if err != nil {
+		return nil, err
+	}
+
+	if vxlanConfig != nil {
+		conn.vxlanConfig = vxlanConfig
+		conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
+		log.Printf("[INFO] TCP connection enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
+	}
+
+	return conn, nil
 }
 
 func (c *TCPConn) Read(buf []byte) (int, error) {

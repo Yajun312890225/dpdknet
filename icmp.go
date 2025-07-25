@@ -42,6 +42,10 @@ type ICMPConn struct {
 	readCh    chan *ICMPPacket
 	mu        sync.Mutex
 	closed    bool
+
+	// VXLAN 选项
+	vxlanConfig  *VXLANConfig
+	vxlanHandler *VXLANHandler
 }
 
 type ICMPReply struct {
@@ -55,6 +59,91 @@ type ICMPReply struct {
 type ICMPPacket struct {
 	Addr net.Addr
 	Data []byte
+}
+
+// ICMPConnAdapter 适配器，让 ICMPConn 实现 net.Conn 接口
+type ICMPConnAdapter struct {
+	conn       *ICMPConn
+	readBuffer []byte
+	readOffset int
+}
+
+// Read 实现 net.Conn 接口
+func (adapter *ICMPConnAdapter) Read(b []byte) (n int, err error) {
+	// 如果缓冲区还有数据，先读取缓冲区的数据
+	if adapter.readOffset < len(adapter.readBuffer) {
+		n = copy(b, adapter.readBuffer[adapter.readOffset:])
+		adapter.readOffset += n
+		if adapter.readOffset >= len(adapter.readBuffer) {
+			adapter.readBuffer = nil
+			adapter.readOffset = 0
+		}
+		return n, nil
+	}
+
+	// 从 ICMP 连接读取新数据
+	buffer := make([]byte, 1500)
+	dataLen, addr, err := adapter.conn.ReadFrom(buffer)
+	if err != nil {
+		return 0, err
+	}
+	data := buffer[:dataLen]
+
+	// 将地址信息添加到数据前面（简化处理）
+	combined := append(addr.(*net.IPAddr).IP.To4(), data...)
+
+	n = copy(b, combined)
+	if n < len(combined) {
+		adapter.readBuffer = combined[n:]
+		adapter.readOffset = 0
+	}
+
+	return n, nil
+}
+
+// Write 实现 net.Conn 接口
+func (adapter *ICMPConnAdapter) Write(b []byte) (n int, err error) {
+	// 简化处理：假设目标地址是前4字节
+	if len(b) < 4 {
+		return 0, fmt.Errorf("data too short for IP address")
+	}
+
+	dstIP := net.IP(b[:4])
+	payload := b[4:]
+
+	addr := &net.IPAddr{IP: dstIP}
+	return adapter.conn.WriteTo(payload, addr)
+}
+
+// Close 实现 net.Conn 接口
+func (adapter *ICMPConnAdapter) Close() error {
+	return adapter.conn.Close()
+}
+
+// LocalAddr 实现 net.Conn 接口
+func (adapter *ICMPConnAdapter) LocalAddr() net.Addr {
+	return adapter.conn.LocalAddr()
+}
+
+// RemoteAddr 实现 net.Conn 接口
+func (adapter *ICMPConnAdapter) RemoteAddr() net.Addr {
+	// ICMP 连接没有固定的远程地址
+	return &net.IPAddr{IP: net.IPv4zero}
+}
+
+// SetDeadline 实现 net.Conn 接口
+func (adapter *ICMPConnAdapter) SetDeadline(t time.Time) error {
+	return adapter.conn.SetDeadline(t)
+}
+
+// SetReadDeadline 实现 net.Conn 接口
+func (adapter *ICMPConnAdapter) SetReadDeadline(t time.Time) error {
+	return adapter.conn.SetReadDeadline(t)
+}
+
+// SetWriteDeadline 实现 net.Conn 接口
+func (adapter *ICMPConnAdapter) SetWriteDeadline(t time.Time) error {
+	return adapter.conn.SetWriteDeadline(t)
 }
 
 // IPConn 实现兼容 net.IPConn 的IP连接
@@ -129,6 +218,11 @@ func ResolveIPAddr(network, address string) (*net.IPAddr, error) {
 
 // NewICMPListener 创建ICMP监听器，实现 net.PacketConn 接口
 func NewICMPListener(laddr *net.IPAddr) (net.PacketConn, error) {
+	return NewICMPListenerWithVXLAN(laddr, nil)
+}
+
+// NewICMPListenerWithVXLAN 创建带 VXLAN 支持的 ICMP 监听器
+func NewICMPListenerWithVXLAN(laddr *net.IPAddr, vxlanConfig *VXLANConfig) (net.PacketConn, error) {
 	// 确保全局网络系统已初始化
 	if err := EnsureGlobalNetworkInit(); err != nil {
 		return nil, err
@@ -143,12 +237,22 @@ func NewICMPListener(laddr *net.IPAddr) (net.PacketConn, error) {
 	}
 
 	conn := &ICMPConn{
-		localIP:   localIP,
-		localAddr: &net.IPAddr{IP: localIP},
-		id:        uint16(time.Now().Unix() & 0xFFFF),
-		seq:       0,
-		replyCh:   make(chan *ICMPReply, 1024),
-		readCh:    make(chan *ICMPPacket, 1024),
+		localIP:     localIP,
+		localAddr:   &net.IPAddr{IP: localIP},
+		id:          uint16(time.Now().Unix() & 0xFFFF),
+		seq:         0,
+		replyCh:     make(chan *ICMPReply, 1024),
+		readCh:      make(chan *ICMPPacket, 1024),
+		vxlanConfig: vxlanConfig,
+	}
+
+	if vxlanConfig != nil {
+		conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
+		// 注册 VXLAN 连接到全局网络栈
+		if globalGVisorStack != nil {
+			globalGVisorStack.RegisterVXLANConnection(localIP, 0, vxlanConfig) // ICMP 没有端口，使用 0
+		}
+		log.Printf("[INFO] ICMP listener enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
 	}
 
 	// 注册ICMP连接
@@ -160,18 +264,32 @@ func NewICMPListener(laddr *net.IPAddr) (net.PacketConn, error) {
 }
 
 func NewICMPConn(localIP net.IP) (*ICMPConn, error) {
+	return NewICMPConnWithVXLAN(localIP, nil)
+}
+
+func NewICMPConnWithVXLAN(localIP net.IP, vxlanConfig *VXLANConfig) (*ICMPConn, error) {
 	// 确保全局网络系统已初始化
 	if err := EnsureGlobalNetworkInit(); err != nil {
 		return nil, err
 	}
 
 	conn := &ICMPConn{
-		localIP:   localIP,
-		localAddr: &net.IPAddr{IP: localIP},
-		id:        uint16(time.Now().Unix() & 0xFFFF),
-		seq:       0,
-		replyCh:   make(chan *ICMPReply, 1024),
-		readCh:    make(chan *ICMPPacket, 1024),
+		localIP:     localIP,
+		localAddr:   &net.IPAddr{IP: localIP},
+		id:          uint16(time.Now().Unix() & 0xFFFF),
+		seq:         0,
+		replyCh:     make(chan *ICMPReply, 1024),
+		readCh:      make(chan *ICMPPacket, 1024),
+		vxlanConfig: vxlanConfig,
+	}
+
+	if vxlanConfig != nil {
+		conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
+		// 注册 VXLAN 连接到全局网络栈
+		if globalGVisorStack != nil {
+			globalGVisorStack.RegisterVXLANConnection(localIP, 0, vxlanConfig) // ICMP 没有端口，使用 0
+		}
+		log.Printf("[INFO] ICMP connection enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
 	}
 
 	// 注册ICMP连接
