@@ -1,6 +1,6 @@
 module vxlan-example
 
-go 1.23.1
+go 1.24.3
 
 require github.com/Yajun312890225/dpdknet v0.0.0
 

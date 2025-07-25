@@ -1,8 +1,6 @@
 module vxlan_option_example
 
-go 1.23.1
-
-toolchain go1.24.3
+go 1.24.3
 
 replace github.com/Yajun312890225/dpdknet => ../..
 

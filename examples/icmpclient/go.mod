@@ -1,8 +1,8 @@
 module icmpclient
 
-go 1.23.1
+go 1.24.3
 
-toolchain go1.24.2
+
 
 require github.com/Yajun312890225/dpdknet v0.0.0
 
