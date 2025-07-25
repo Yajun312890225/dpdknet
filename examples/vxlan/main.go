@@ -14,7 +14,7 @@ func main() {
 	log.Printf("Starting VXLAN example with DPDK integration...")
 
 	// VXLAN 服务器示例
-	go runVXLANServer()
+	// go runVXLANServer()
 
 	// 等待服务器启动
 	time.Sleep(3 * time.Second)
@@ -89,7 +89,7 @@ func handleVXLANConnection(conn net.Conn) {
 func runVXLANClient() {
 	// 创建远程 VXLAN 地址
 	remoteAddr := &dpdknet.VXLANAddr{
-		IP:   net.ParseIP("192.168.1.100"),
+		IP:   net.ParseIP("192.168.66.115"),
 		Port: 4789,
 		VNI:  1000,
 	}

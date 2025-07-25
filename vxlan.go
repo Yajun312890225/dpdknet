@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os/exec"
+	"strings"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -38,7 +40,7 @@ func NewVXLANHandler(config *VXLANConfig) *VXLANHandler {
 		config = DefaultVXLANConfig()
 	}
 	return &VXLANHandler{
-		config:  config,
+		config: config,
 	}
 }
 
@@ -173,7 +175,7 @@ func CreateVXLANTunnel(localIP, remoteIP net.IP, vni uint32) *VXLANConfig {
 		RemoteIP:  remoteIP,
 		UDPPort:   4789,
 		LocalMAC:  getLocalMAC(),
-		RemoteMAC: generateRemoteMAC(), // 可以从 ARP 表获取或手动配置
+		RemoteMAC: getRemoteMACFromARP(remoteIP), // 通过 ARP 表获取
 	}
 }
 
@@ -186,10 +188,40 @@ func getLocalMAC() net.HardwareAddr {
 }
 
 // generateRemoteMAC 生成或获取远程 MAC 地址
-func generateRemoteMAC() net.HardwareAddr {
-	// 简化实现，使用默认的远程 MAC
-	// 实际应用中应该通过 ARP 解析获取
-	return net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}
+// getRemoteMACFromARP 通过 ARP 表获取远程 MAC 地址
+func getRemoteMACFromARP(remoteIP net.IP) net.HardwareAddr {
+	// 仅支持 Linux，macOS 可用 arp 命令
+	// 这里用 shell 调用 arp 命令解析
+	ipStr := remoteIP.String()
+	out, err := execCommand("arp", []string{"-n", ipStr})
+	if err != nil {
+		log.Printf("[WARN] ARP 查询失败: %v", err)
+		return nil
+	}
+	// 解析输出，提取 MAC
+	// macOS arp 输出: ? (192.168.66.115) at 00:50:56:ab:cd:ef on en0 ifscope [ethernet]
+	fields := strings.Fields(out)
+	for i, f := range fields {
+		if f == "at" && i+1 < len(fields) {
+			macStr := fields[i+1]
+			mac, err := net.ParseMAC(macStr)
+			if err == nil {
+				return mac
+			}
+		}
+	}
+	log.Printf("[WARN] 未找到 ARP MAC, IP: %s", ipStr)
+	return nil
+}
+
+// execCommand 执行命令并返回输出
+func execCommand(cmd string, args []string) (string, error) {
+	c := exec.Command(cmd, args...)
+	out, err := c.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
 // VXLANStats VXLAN 统计信息

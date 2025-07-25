@@ -109,7 +109,7 @@ func DialVXLAN(network string, localAddr, remoteAddr *VXLANAddr) (*VXLANConn, er
 		RemoteIP:  remoteAddr.IP,
 		UDPPort:   uint16(remoteAddr.Port),
 		LocalMAC:  getLocalMAC(),
-		RemoteMAC: generateRemoteMAC(),
+		RemoteMAC: getRemoteMACFromARP(remoteAddr.IP),
 	}
 
 	vxlanConn := &VXLANConn{
@@ -289,7 +289,7 @@ func ListenVXLAN(network string, addr *VXLANAddr) (*VXLANListener, error) {
 		LocalIP:   getLocalIPFromEnv(),
 		UDPPort:   uint16(addr.Port),
 		LocalMAC:  getLocalMAC(),
-		RemoteMAC: generateRemoteMAC(),
+		RemoteMAC: getRemoteMACFromARP(addr.IP),
 	}
 
 	listener := &VXLANListener{
