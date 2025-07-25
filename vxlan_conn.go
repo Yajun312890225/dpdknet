@@ -6,6 +6,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/google/gopacket/layers"
 )
 
 // VXLANConn VXLAN 连接，基于 DPDK 数据路径
@@ -21,9 +23,10 @@ type VXLANConn struct {
 
 // VXLANAddr VXLAN 地址 - 表示内层虚拟网络地址
 type VXLANAddr struct {
-	IP   net.IP // 内层虚拟 IP（应用层地址）
-	Port int    // 内层端口（应用层端口）
-	VNI  uint32 // VXLAN Network Identifier
+	IP       net.IP // 内层虚拟 IP（应用层地址）
+	Port     int    // 内层端口（应用层端口）
+	VNI      uint32 // VXLAN Network Identifier
+	Protocol string // 内层协议类型：udp、tcp、icmp
 }
 
 func (va *VXLANAddr) Network() string {
@@ -31,7 +34,24 @@ func (va *VXLANAddr) Network() string {
 }
 
 func (va *VXLANAddr) String() string {
+	if va.Protocol != "" {
+		return fmt.Sprintf("%s:%d/%s/vni:%d", va.IP.String(), va.Port, va.Protocol, va.VNI)
+	}
 	return fmt.Sprintf("%s:%d/vni:%d", va.IP.String(), va.Port, va.VNI)
+}
+
+// parseProtocol 解析协议字符串为 gopacket 协议类型
+func parseProtocol(protocol string) layers.IPProtocol {
+	switch protocol {
+	case "tcp":
+		return layers.IPProtocolTCP
+	case "icmp":
+		return layers.IPProtocolICMPv4
+	case "udp", "":
+		return layers.IPProtocolUDP
+	default:
+		return layers.IPProtocolUDP
+	}
 }
 
 // ParseVXLANAddr 解析 VXLAN 地址
@@ -64,24 +84,33 @@ func ParseVXLANAddr(addr string) (*VXLANAddr, error) {
 }
 
 // NewVXLANAddr 创建新的 VXLAN 地址
-func NewVXLANAddr(ip string, port int, vni uint32) (*VXLANAddr, error) {
+func NewVXLANAddr(ip string, port int, vni uint32, protocol string) (*VXLANAddr, error) {
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
 		return nil, fmt.Errorf("invalid IP address: %s", ip)
 	}
 
 	if port <= 0 {
-		port = 4789 // 默认 VXLAN 端口
+		if protocol == "icmp" {
+			port = 0 // ICMP 没有端口概念
+		} else {
+			port = 4789 // 默认端口
+		}
 	}
 
 	if vni == 0 {
 		vni = 1000 // 默认 VNI
 	}
 
+	if protocol == "" {
+		protocol = "udp" // 默认协议
+	}
+
 	return &VXLANAddr{
-		IP:   parsedIP,
-		Port: port,
-		VNI:  vni,
+		IP:       parsedIP,
+		Port:     port,
+		VNI:      vni,
+		Protocol: protocol,
 	}, nil
 }
 
@@ -162,12 +191,15 @@ func (vc *VXLANConn) startPacketProcessor() {
 
 // sendVXLANPacket 发送 VXLAN 包
 func (vc *VXLANConn) sendVXLANPacket(data []byte) error {
-	// 生成内层以太网地址
-	innerSrcMAC := vc.handler.config.LocalMAC
-	innerDstMAC := vc.handler.config.RemoteMAC
+	// 使用内层网络地址信息
+	innerSrcIP := vc.localAddr.IP
+	innerDstIP := vc.remoteAddr.IP
+	innerSrcPort := uint16(vc.localAddr.Port)
+	innerDstPort := uint16(vc.remoteAddr.Port)
+	protocol := parseProtocol(vc.remoteAddr.Protocol)
 
-	// 封装 VXLAN 包
-	vxlanPacket, err := vc.handler.EncapsulateVXLAN(data, innerSrcMAC, innerDstMAC)
+	// 封装 VXLAN 包，包含完整的内层网络栈
+	vxlanPacket, err := vc.handler.EncapsulateVXLAN(data, innerSrcIP, innerDstIP, innerSrcPort, innerDstPort, protocol)
 	if err != nil {
 		return fmt.Errorf("VXLAN encapsulation failed: %v", err)
 	}
@@ -381,7 +413,7 @@ func handleIncomingVXLANPacket(data []byte) {
 
 	// 创建临时处理器进行解封装
 	tmpHandler := NewVXLANHandler(DefaultVXLANConfig())
-	innerPayload, _, _, vni, err := tmpHandler.DecapsulateVXLAN(data)
+	innerPayload, innerSrcIP, _, innerSrcPort, _, protocol, vni, err := tmpHandler.DecapsulateVXLAN(data)
 	if err != nil {
 		log.Printf("[DEBUG] Failed to decapsulate VXLAN packet: %v", err)
 		return
@@ -394,11 +426,20 @@ func handleIncomingVXLANPacket(data []byte) {
 
 	if exists && !listener.closed {
 		// 创建新的连接或将数据发送到现有连接
-		// 这里简化实现，直接创建一个连接
+		// 使用解封装得到的内层网络信息
+		protocolStr := "udp"
+		switch protocol {
+		case layers.IPProtocolTCP:
+			protocolStr = "tcp"
+		case layers.IPProtocolICMPv4:
+			protocolStr = "icmp"
+		}
+
 		remoteAddr := &VXLANAddr{
-			IP:   net.IPv4(192, 168, 1, 100), // 临时远程地址
-			Port: 4789,
-			VNI:  vni,
+			IP:       innerSrcIP,        // 远程内层 IP
+			Port:     int(innerSrcPort), // 远程内层端口
+			VNI:      vni,               // VXLAN 网络标识
+			Protocol: protocolStr,       // 协议类型
 		}
 
 		conn := &VXLANConn{

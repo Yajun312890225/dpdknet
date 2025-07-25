@@ -41,9 +41,10 @@ func main() {
 func runVXLANServer() {
 	// 创建内层 VXLAN 地址（虚拟网络中的地址）
 	vxlanAddr := &dpdknet.VXLANAddr{
-		IP:   net.ParseIP("10.0.1.100"), // 内层虚拟 IP
-		Port: 8080,                      // 内层应用端口
-		VNI:  1000,                      // VXLAN 网络标识
+		IP:       net.ParseIP("10.0.1.100"), // 内层虚拟 IP
+		Port:     8080,                      // 内层应用端口
+		VNI:      1000,                      // VXLAN 网络标识
+		Protocol: "tcp",                     // 内层协议类型：tcp、udp、icmp
 	}
 
 	// 监听 VXLAN 连接 (基于 DPDK)
@@ -105,16 +106,18 @@ func handleVXLANConnection(conn net.Conn) {
 func runVXLANClient() {
 	// 创建远程内层 VXLAN 地址（目标虚拟网络地址）
 	remoteAddr := &dpdknet.VXLANAddr{
-		IP:   net.ParseIP("10.0.1.100"), // 内层目标虚拟 IP
-		Port: 8080,                      // 内层目标应用端口
-		VNI:  1000,                      // VXLAN 网络标识
+		IP:       net.ParseIP("10.0.1.100"), // 内层目标虚拟 IP
+		Port:     8080,                      // 内层目标应用端口
+		VNI:      1000,                      // VXLAN 网络标识
+		Protocol: "tcp",                     // 内层协议类型：tcp、udp、icmp
 	}
 
 	// 本地内层地址（可选）
 	localAddr := &dpdknet.VXLANAddr{
-		IP:   net.ParseIP("10.0.1.200"), // 内层本地虚拟 IP
-		Port: 8081,                      // 内层本地应用端口
-		VNI:  1000,                      // VXLAN 网络标识
+		IP:       net.ParseIP("10.0.1.200"), // 内层本地虚拟 IP
+		Port:     8081,                      // 内层本地应用端口
+		VNI:      1000,                      // VXLAN 网络标识
+		Protocol: "tcp",                     // 内层协议类型：tcp、udp、icmp
 	}
 
 	// 连接到 VXLAN 服务器 (通过 DPDK)

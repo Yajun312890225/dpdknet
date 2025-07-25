@@ -44,8 +44,8 @@ func NewVXLANHandler(config *VXLANConfig) *VXLANHandler {
 	}
 }
 
-// EncapsulateVXLAN 封装 VXLAN 包
-func (vh *VXLANHandler) EncapsulateVXLAN(innerPayload []byte, innerEthSrc, innerEthDst net.HardwareAddr) ([]byte, error) {
+// EncapsulateVXLAN 封装 VXLAN 包，支持多种内层协议
+func (vh *VXLANHandler) EncapsulateVXLAN(innerPayload []byte, innerSrcIP, innerDstIP net.IP, innerSrcPort, innerDstPort uint16, protocol layers.IPProtocol) ([]byte, error) {
 	// 创建包缓冲区
 	buf := gopacket.NewSerializeBuffer()
 	opts := gopacket.SerializeOptions{
@@ -85,21 +85,58 @@ func (vh *VXLANHandler) EncapsulateVXLAN(innerPayload []byte, innerEthSrc, inner
 
 	// 5. 构建内层以太网头
 	innerEthLayer := &layers.Ethernet{
-		SrcMAC:       innerEthSrc,
-		DstMAC:       innerEthDst,
+		SrcMAC:       generateInnerMAC(innerSrcIP), // 基于内层 IP 生成 MAC
+		DstMAC:       generateInnerMAC(innerDstIP), // 基于内层 IP 生成 MAC
 		EthernetType: layers.EthernetTypeIPv4,
 	}
 
-	// 序列化所有层
-	err := gopacket.SerializeLayers(buf, opts,
-		ethLayer,
-		ipLayer,
-		udpLayer,
-		vxlanLayer,
-		innerEthLayer,
-		gopacket.Payload(innerPayload),
-	)
+	// 6. 构建内层 IP 头
+	innerIPLayer := &layers.IPv4{
+		Version:  4,
+		IHL:      5,
+		TTL:      64,
+		Protocol: protocol, // 支持不同协议
+		SrcIP:    innerSrcIP,
+		DstIP:    innerDstIP,
+	}
 
+	// 7. 根据协议类型构建内层传输层
+	var layersToSerialize []gopacket.SerializableLayer
+	layersToSerialize = append(layersToSerialize, ethLayer, ipLayer, udpLayer, vxlanLayer, innerEthLayer, innerIPLayer)
+
+	switch protocol {
+	case layers.IPProtocolUDP:
+		// 构建内层 UDP 头
+		innerUDPLayer := &layers.UDP{
+			SrcPort: layers.UDPPort(innerSrcPort),
+			DstPort: layers.UDPPort(innerDstPort),
+		}
+		innerUDPLayer.SetNetworkLayerForChecksum(innerIPLayer)
+		layersToSerialize = append(layersToSerialize, innerUDPLayer)
+
+	case layers.IPProtocolTCP:
+		// 构建内层 TCP 头
+		innerTCPLayer := &layers.TCP{
+			SrcPort: layers.TCPPort(innerSrcPort),
+			DstPort: layers.TCPPort(innerDstPort),
+			Seq:     1,
+			Ack:     0,
+			PSH:     true,
+			Window:  8192,
+		}
+		innerTCPLayer.SetNetworkLayerForChecksum(innerIPLayer)
+		layersToSerialize = append(layersToSerialize, innerTCPLayer)
+
+	case layers.IPProtocolICMPv4:
+		// 对于 ICMP，不需要端口信息，直接添加载荷
+		// ICMP 头在 innerPayload 中
+	}
+
+	// 添加有效载荷
+	layersToSerialize = append(layersToSerialize, gopacket.Payload(innerPayload))
+
+	// 序列化所有层
+	err := gopacket.SerializeLayers(buf, opts, layersToSerialize...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize VXLAN packet: %v", err)
 	}
@@ -107,40 +144,113 @@ func (vh *VXLANHandler) EncapsulateVXLAN(innerPayload []byte, innerEthSrc, inner
 	return buf.Bytes(), nil
 }
 
-// DecapsulateVXLAN 解封装 VXLAN 包
-func (vh *VXLANHandler) DecapsulateVXLAN(data []byte) (innerPayload []byte, innerEthSrc, innerEthDst net.HardwareAddr, vni uint32, err error) {
+// generateInnerMAC 基于内层 IP 生成虚拟 MAC 地址
+func generateInnerMAC(ip net.IP) net.HardwareAddr {
+	if ip == nil {
+		return net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+	}
+	// 使用 IP 的最后4个字节生成 MAC（前缀02:00表示本地管理地址）
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+	}
+	return net.HardwareAddr{0x02, 0x00, ip4[0], ip4[1], ip4[2], ip4[3]}
+}
+
+// DecapsulateVXLAN 解封装 VXLAN 包，返回内层网络信息
+func (vh *VXLANHandler) DecapsulateVXLAN(data []byte) (innerPayload []byte, innerSrcIP, innerDstIP net.IP, innerSrcPort, innerDstPort uint16, protocol layers.IPProtocol, vni uint32, err error) {
 	packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
 
 	// 检查是否包含 VXLAN 层
 	vxlanLayer := packet.Layer(layers.LayerTypeVXLAN)
 	if vxlanLayer == nil {
-		return nil, nil, nil, 0, fmt.Errorf("packet does not contain VXLAN layer")
+		return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("packet does not contain VXLAN layer")
 	}
 
 	vxlan, ok := vxlanLayer.(*layers.VXLAN)
 	if !ok {
-		return nil, nil, nil, 0, fmt.Errorf("invalid VXLAN layer")
+		return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("invalid VXLAN layer")
 	}
 
 	// 检查 VNI 是否匹配
 	if vxlan.VNI != vh.config.VNI {
-		return nil, nil, nil, 0, fmt.Errorf("VNI mismatch: expected %d, got %d", vh.config.VNI, vxlan.VNI)
+		return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("VNI mismatch: expected %d, got %d", vh.config.VNI, vxlan.VNI)
 	}
 
-	// 获取内层以太网头
-	payload := vxlan.LayerPayload()
-	if len(payload) < 14 { // 以太网头最小长度
-		return nil, nil, nil, 0, fmt.Errorf("invalid inner ethernet frame")
+	// 解析内层包
+	innerPacket := gopacket.NewPacket(vxlan.LayerPayload(), layers.LayerTypeEthernet, gopacket.Default)
+
+	// 获取内层 IP 层
+	innerIPLayer := innerPacket.Layer(layers.LayerTypeIPv4)
+	if innerIPLayer == nil {
+		return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("inner packet does not contain IP layer")
 	}
 
-	// 解析内层以太网头
-	innerEthDst = payload[0:6]
-	innerEthSrc = payload[6:12]
+	innerIP, ok := innerIPLayer.(*layers.IPv4)
+	if !ok {
+		return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("invalid inner IP layer")
+	}
 
-	// 获取内层有效载荷（跳过以太网头）
-	innerPayload = payload[14:]
+	innerSrcIP = innerIP.SrcIP
+	innerDstIP = innerIP.DstIP
+	protocol = innerIP.Protocol
 
-	return innerPayload, innerEthSrc, innerEthDst, vxlan.VNI, nil
+	// 根据协议类型解析传输层
+	switch protocol {
+	case layers.IPProtocolUDP:
+		// 获取内层 UDP 层
+		innerUDPLayer := innerPacket.Layer(layers.LayerTypeUDP)
+		if innerUDPLayer == nil {
+			return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("inner packet does not contain UDP layer")
+		}
+
+		innerUDP, ok := innerUDPLayer.(*layers.UDP)
+		if !ok {
+			return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("invalid inner UDP layer")
+		}
+
+		innerSrcPort = uint16(innerUDP.SrcPort)
+		innerDstPort = uint16(innerUDP.DstPort)
+		innerPayload = innerUDP.Payload
+
+	case layers.IPProtocolTCP:
+		// 获取内层 TCP 层
+		innerTCPLayer := innerPacket.Layer(layers.LayerTypeTCP)
+		if innerTCPLayer == nil {
+			return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("inner packet does not contain TCP layer")
+		}
+
+		innerTCP, ok := innerTCPLayer.(*layers.TCP)
+		if !ok {
+			return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("invalid inner TCP layer")
+		}
+
+		innerSrcPort = uint16(innerTCP.SrcPort)
+		innerDstPort = uint16(innerTCP.DstPort)
+		innerPayload = innerTCP.Payload
+
+	case layers.IPProtocolICMPv4:
+		// 对于 ICMP，没有端口概念
+		innerSrcPort = 0
+		innerDstPort = 0
+		// 获取 ICMP 层数据
+		innerICMPLayer := innerPacket.Layer(layers.LayerTypeICMPv4)
+		if innerICMPLayer != nil {
+			innerICMP := innerICMPLayer.(*layers.ICMPv4)
+			innerPayload = innerICMP.Payload
+		} else {
+			// 如果没有找到 ICMP 层，使用 IP 载荷
+			innerPayload = innerIP.Payload
+		}
+
+	default:
+		// 其他协议，直接使用 IP 载荷
+		innerSrcPort = 0
+		innerDstPort = 0
+		innerPayload = innerIP.Payload
+	}
+
+	return innerPayload, innerSrcIP, innerDstIP, innerSrcPort, innerDstPort, protocol, vxlan.VNI, nil
 }
 
 // IsVXLANPacket 检查数据包是否为 VXLAN 包
