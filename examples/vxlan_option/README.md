@@ -13,10 +13,21 @@ conn, err := dpdknet.Dial("vxlan", "192.168.1.20:4789")
 
 ### 新的架构 (VXLAN 作为选项)
 ```go
-// TCP/UDP 的 VXLAN 选项
-vxlanConfig := &dpdknet.VXLANConfig{...}
-listener, err := dpdknet.ListenWithOptions("tcp", ":8080", vxlanConfig)
-conn, err := dpdknet.DialWithOptions("tcp", "192.168.1.10:8080", vxlanConfig)
+// TCP/UDP 的 VXLAN 选项 - Option 风格
+vxlanConfig := &dpdknet.VXLANConfig{
+    VNI:      1000,
+    LocalIP:  net.ParseIP("192.168.1.100"),
+    RemoteIP: net.ParseIP("192.168.1.200"),
+    UDPPort:  4789,
+}
+
+// 使用 WithVXLAN Option
+listener, err := dpdknet.Listen("tcp", ":8080", dpdknet.WithVXLAN(vxlanConfig))
+conn, err := dpdknet.Dial("tcp", "192.168.1.10:8080", dpdknet.WithVXLAN(vxlanConfig))
+
+// 或使用辅助方法
+listener, err := dpdknet.ListenWithVXLAN("tcp", ":8080", vxlanConfig)
+conn, err := dpdknet.DialWithVXLAN("tcp", "192.168.1.10:8080", vxlanConfig)
 ```
 
 ## 新架构的优势

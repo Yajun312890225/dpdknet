@@ -5,12 +5,13 @@ import (
 	"net"
 )
 
-// Listen announces on the local network address.
-func Listen(network, address string, options ...*VXLANConfig) (net.Listener, error) {
-	var vxlanConfig *VXLANConfig
-	if len(options) > 0 {
-		vxlanConfig = options[0]
+// Listen announces on the local network address with Option 风格。
+func Listen(network, address string, opts ...Option) (net.Listener, error) {
+	o := setDefaultOption()
+	for _, opt := range opts {
+		opt(o)
 	}
+	vxlanConfig := o.vxlanConfig
 
 	switch network {
 	case "tcp", "tcp4", "tcp6":
@@ -27,17 +28,18 @@ func Listen(network, address string, options ...*VXLANConfig) (net.Listener, err
 	}
 }
 
-// ListenWithOptions announces on the local network address with options.
-func ListenWithOptions(network, address string, vxlanConfig *VXLANConfig) (net.Listener, error) {
-	return Listen(network, address, vxlanConfig)
+// ListenWithVXLAN 辅助方法，显式传递 VXLAN 配置。
+func ListenWithVXLAN(network, address string, vxlanConfig *VXLANConfig) (net.Listener, error) {
+	return Listen(network, address, WithVXLAN(vxlanConfig))
 }
 
-// ListenPacket announces on the local network address.
-func ListenPacket(network, address string, options ...*VXLANConfig) (net.PacketConn, error) {
-	var vxlanConfig *VXLANConfig
-	if len(options) > 0 {
-		vxlanConfig = options[0]
+// ListenPacket announces on the local network address with Option 风格。
+func ListenPacket(network, address string, opts ...Option) (net.PacketConn, error) {
+	o := setDefaultOption()
+	for _, opt := range opts {
+		opt(o)
 	}
+	vxlanConfig := o.vxlanConfig
 
 	switch network {
 	case "udp", "udp4", "udp6":
@@ -60,7 +62,7 @@ func ListenPacket(network, address string, options ...*VXLANConfig) (net.PacketC
 	}
 }
 
-// ListenPacketWithOptions announces on the local network address with options.
-func ListenPacketWithOptions(network, address string, vxlanConfig *VXLANConfig) (net.PacketConn, error) {
-	return ListenPacket(network, address, vxlanConfig)
+// ListenPacketWithVXLAN 辅助方法，显式传递 VXLAN 配置。
+func ListenPacketWithVXLAN(network, address string, vxlanConfig *VXLANConfig) (net.PacketConn, error) {
+	return ListenPacket(network, address, WithVXLAN(vxlanConfig))
 }

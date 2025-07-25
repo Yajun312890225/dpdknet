@@ -6,6 +6,7 @@ import (
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -355,4 +356,121 @@ func (vh *VXLANHandler) SetConfig(config *VXLANConfig) {
 // GetConfig 获取当前 VXLAN 配置
 func (vh *VXLANHandler) GetConfig() *VXLANConfig {
 	return vh.config
+}
+
+// handleIncomingVXLANPacket 处理传入的 VXLAN 包
+func handleIncomingVXLANPacket(data []byte) {
+	// 检查是否为 VXLAN 包
+	if !IsVXLANPacket(data) {
+		return
+	}
+
+	// 创建临时处理器进行解封装
+	tmpHandler := NewVXLANHandler(DefaultVXLANConfig())
+	innerPayload, innerSrcIP, innerDstIP, innerSrcPort, innerDstPort, protocol, vni, err := tmpHandler.DecapsulateVXLAN(data)
+	if err != nil {
+		log.Printf("[DEBUG] Failed to decapsulate VXLAN packet: %v", err)
+		return
+	}
+
+	// 保存 VNI 映射信息，用于回程封装
+	saveVNIMapping(innerSrcIP, innerDstIP, vni)
+
+	// 构建内层 IP 包
+	innerIPPacket := constructInnerIPPacket(innerPayload, innerSrcIP, innerDstIP, innerSrcPort, innerDstPort, protocol)
+
+	// 注入到 gVisor netstack 进行协议栈处理
+	if gvisor := GetGVisorNetstack(); gvisor != nil {
+		gvisor.InjectDPDKPacket(innerIPPacket)
+		log.Printf("[DEBUG] VXLAN packet injected to gVisor: src=%s:%d, dst=%s:%d, VNI=%d",
+			innerSrcIP, innerSrcPort, innerDstIP, innerDstPort, vni)
+	}
+}
+
+// 保存 VNI 映射信息，用于回程封装
+var (
+	vniMappings     = make(map[string]uint32) // IP对 -> VNI
+	vniMappingMutex sync.RWMutex
+)
+
+// saveVNIMapping 保存 VNI 映射信息
+func saveVNIMapping(srcIP, dstIP net.IP, vni uint32) {
+	key := fmt.Sprintf("%s-%s", srcIP.String(), dstIP.String())
+	vniMappingMutex.Lock()
+	vniMappings[key] = vni
+	vniMappingMutex.Unlock()
+}
+
+// getVNIForDestination 获取目标 IP 对应的 VNI
+func getVNIForDestination(srcIP, dstIP net.IP) (uint32, bool) {
+	key := fmt.Sprintf("%s-%s", srcIP.String(), dstIP.String())
+	vniMappingMutex.RLock()
+	vni, exists := vniMappings[key]
+	vniMappingMutex.RUnlock()
+	return vni, exists
+}
+
+// constructInnerIPPacket 构建内层 IP 包
+func constructInnerIPPacket(payload []byte, srcIP, dstIP net.IP, srcPort, dstPort uint16, protocol layers.IPProtocol) []byte {
+	// 创建以太网帧
+	ethLayer := &layers.Ethernet{
+		SrcMAC:       generateInnerMAC(srcIP),
+		DstMAC:       generateInnerMAC(dstIP),
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	// 创建 IP 层
+	ipLayer := &layers.IPv4{
+		Version:  4,
+		IHL:      5,
+		TTL:      64,
+		Protocol: protocol,
+		SrcIP:    srcIP,
+		DstIP:    dstIP,
+	}
+
+	// 创建传输层
+	var transportLayer gopacket.SerializableLayer
+
+	switch protocol {
+	case layers.IPProtocolTCP:
+		transportLayer = &layers.TCP{
+			SrcPort: layers.TCPPort(srcPort),
+			DstPort: layers.TCPPort(dstPort),
+		}
+		tcp := transportLayer.(*layers.TCP)
+		tcp.SetNetworkLayerForChecksum(ipLayer)
+	case layers.IPProtocolUDP:
+		transportLayer = &layers.UDP{
+			SrcPort: layers.UDPPort(srcPort),
+			DstPort: layers.UDPPort(dstPort),
+		}
+		udp := transportLayer.(*layers.UDP)
+		udp.SetNetworkLayerForChecksum(ipLayer)
+	case layers.IPProtocolICMPv4:
+		transportLayer = &layers.ICMPv4{
+			TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0),
+		}
+	}
+
+	// 序列化包
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	var err error
+	if transportLayer != nil {
+		err = gopacket.SerializeLayers(buf, opts, ethLayer, ipLayer, transportLayer, gopacket.Payload(payload))
+	} else {
+		err = gopacket.SerializeLayers(buf, opts, ethLayer, ipLayer, gopacket.Payload(payload))
+	}
+
+	if err != nil {
+		log.Printf("[ERROR] Failed to serialize inner IP packet: %v", err)
+		return nil
+	}
+
+	return buf.Bytes()
 }

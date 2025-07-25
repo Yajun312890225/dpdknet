@@ -141,31 +141,58 @@ func main() {
 #### TCP连接
 
 ```go
-// 监听TCP端口
+// 监听TCP端口 - 基本用法
 listener, err := dpdknet.Listen("tcp", ":8080")
 listener, err := dpdknet.ListenTCP("tcp", &dpdknet.TCPAddr{Port: 8080})
 
-// 连接到TCP服务器
+// 监听TCP端口 - 使用 VXLAN 选项
+vxlanConfig := &dpdknet.VXLANConfig{
+    VNI:      1000,
+    LocalIP:  net.ParseIP("192.168.1.100"),
+    RemoteIP: net.ParseIP("192.168.1.200"),
+    UDPPort:  4789,
+}
+listener, err := dpdknet.Listen("tcp", ":8080", dpdknet.WithVXLAN(vxlanConfig))
+// 或使用辅助方法
+listener, err := dpdknet.ListenWithVXLAN("tcp", ":8080", vxlanConfig)
+
+// 连接到TCP服务器 - 基本用法
 conn, err := dpdknet.Dial("tcp", "192.168.1.100:8080")
 conn, err := dpdknet.DialTCP("tcp", nil, addr)
 conn, err := dpdknet.DialTimeout("tcp", "192.168.1.100:8080", 5*time.Second)
+
+// 连接到TCP服务器 - 使用 VXLAN 选项
+conn, err := dpdknet.Dial("tcp", "192.168.1.100:8080", dpdknet.WithVXLAN(vxlanConfig))
+// 或使用辅助方法
+conn, err := dpdknet.DialWithVXLAN("tcp", "192.168.1.100:8080", vxlanConfig)
 ```
 
 #### UDP连接
 
 ```go
-// 监听UDP端口
+// 监听UDP端口 - 基本用法
 conn, err := dpdknet.ListenUDP("udp", &dpdknet.UDPAddr{Port: 8080})
+conn, err := dpdknet.ListenPacket("udp", ":8080")
+
+// 监听UDP端口 - 使用 VXLAN 选项
+conn, err := dpdknet.ListenPacket("udp", ":8080", dpdknet.WithVXLAN(vxlanConfig))
+// 或使用辅助方法
+conn, err := dpdknet.ListenPacketWithVXLAN("udp", ":8080", vxlanConfig)
 
 // 连接到UDP服务器
 conn, err := dpdknet.DialUDP("udp", nil, addr)
+conn, err := dpdknet.Dial("udp", "192.168.1.100:8080", dpdknet.WithVXLAN(vxlanConfig))
 ```
 
 #### ICMP连接
 
 ```go
-// 监听ICMP (兼容net.ListenIP)
+// 监听ICMP - 基本用法
 conn, err := dpdknet.ListenIP("ip4:icmp", nil)
+conn, err := dpdknet.ListenPacket("icmp", "0.0.0.0")
+
+// 监听ICMP - 使用 VXLAN 选项
+conn, err := dpdknet.ListenPacket("icmp", "0.0.0.0", dpdknet.WithVXLAN(vxlanConfig))
 
 // 解析IP地址
 addr, err := dpdknet.ResolveIPAddr("ip4:icmp", "192.168.1.1")
@@ -173,31 +200,61 @@ addr, err := dpdknet.ResolveIPAddr("ip4:icmp", "192.168.1.1")
 // 发送ICMP数据包
 n, err := conn.WriteTo(icmpData, addr)
 n, addr, err := conn.ReadFrom(buffer)
+
+// 连接到远程主机 - 使用 VXLAN 选项
+conn, err := dpdknet.Dial("icmp", "192.168.1.100", dpdknet.WithVXLAN(vxlanConfig))
 ```
 
-#### VXLAN隧道
+#### VXLAN配置选项
 
 ```go
-// 创建VXLAN监听器
-vxlanAddr := &dpdknet.VXLANAddr{
-    IP:   net.ParseIP("192.168.1.100"),
-    Port: 4789,  // 标准VXLAN端口
-    VNI:  1000,  // 虚拟网络标识符
+// VXLAN配置结构
+vxlanConfig := &dpdknet.VXLANConfig{
+    VNI:      1000,                            // VXLAN Network Identifier
+    LocalIP:  net.ParseIP("192.168.1.100"),   // 本地 VTEP IP
+    RemoteIP: net.ParseIP("192.168.1.200"),   // 远程 VTEP IP
+    UDPPort:  4789,                           // VXLAN UDP 端口 (默认 4789)
 }
-listener, err := dpdknet.ListenVXLAN("vxlan", vxlanAddr)
 
-// 创建VXLAN连接
-remoteAddr := &dpdknet.VXLANAddr{
-    IP:   net.ParseIP("192.168.1.200"),
-    Port: 4789,
-    VNI:  1000,
-}
-conn, err := dpdknet.DialVXLAN("vxlan", nil, remoteAddr)
+// 使用 Option 风格 - 可变参数
+conn, err := dpdknet.Dial("tcp", "10.0.0.1:8080", dpdknet.WithVXLAN(vxlanConfig))
+listener, err := dpdknet.Listen("tcp", ":8080", dpdknet.WithVXLAN(vxlanConfig))
 
-// 或使用标准接口
-conn, err := dpdknet.Dial("vxlan", "192.168.1.200:4789")
-listener, err := dpdknet.Listen("vxlan", "192.168.1.100:4789")
+// 使用辅助方法 - 显式 VXLAN 配置
+conn, err := dpdknet.DialWithVXLAN("tcp", "10.0.0.1:8080", vxlanConfig)
+listener, err := dpdknet.ListenWithVXLAN("tcp", ":8080", vxlanConfig)
 
+// 支持多种协议的 VXLAN 封装
+udpConn, err := dpdknet.ListenPacketWithVXLAN("udp", ":9090", vxlanConfig)
+icmpConn, err := dpdknet.Dial("icmp", "10.0.0.1", dpdknet.WithVXLAN(vxlanConfig))
+```
+
+#### Option 模式详解
+
+DPDK Net 提供了两种使用 VXLAN 的方式：
+
+**1. Option 风格（推荐）- 可变参数**
+```go
+// 直接使用 WithVXLAN Option
+conn, err := dpdknet.Dial("tcp", "server:8080", dpdknet.WithVXLAN(vxlanConfig))
+listener, err := dpdknet.Listen("tcp", ":8080", dpdknet.WithVXLAN(vxlanConfig))
+
+// 支持多个 Option（未来扩展）
+conn, err := dpdknet.Dial("tcp", "server:8080", 
+    dpdknet.WithVXLAN(vxlanConfig),
+    // dpdknet.WithTimeout(30*time.Second), // 未来可能的扩展
+)
+```
+
+**2. 辅助方法风格 - 显式传参**
+```go
+// 明确指定 VXLAN 配置
+conn, err := dpdknet.DialWithVXLAN("tcp", "server:8080", vxlanConfig)
+listener, err := dpdknet.ListenWithVXLAN("tcp", ":8080", vxlanConfig)
+udpConn, err := dpdknet.ListenPacketWithVXLAN("udp", ":9090", vxlanConfig)
+```
+
+```go
 // VXLAN配置选项
 config := &dpdknet.VXLANConfig{
     VNI:       1000,                           // 虚拟网络ID
@@ -649,7 +706,8 @@ func runVXLANClient() {
     }
     
     // 连接到VXLAN服务器 (通过DPDK)
-    conn, err := dpdknet.DialVXLAN("vxlan", nil, remoteAddr)
+    vxlanConfig := &dpdknet.VXLANConfig{ /* ...参数... */ }
+    conn, err := dpdknet.DialWithVXLAN("tcp", "192.168.1.10:8080", vxlanConfig)
     if err != nil {
         log.Fatalf("Failed to dial VXLAN: %v", err)
     }
@@ -747,15 +805,18 @@ var connPool = sync.Pool{
 
 | 标准库函数 | DPDK Net | 兼容性 | 说明 |
 |------------|----------|--------|------|
-| `net.Listen()` | `dpdknet.Listen()` | ✅ 100% | 完全相同的签名和行为 |
-| `net.Dial()` | `dpdknet.Dial()` | ✅ 100% | 支持TCP/UDP协议 |
+| `net.Listen()` | `dpdknet.Listen()` | ✅ 100% | 完全相同的签名和行为，支持 Option |
+| `net.Dial()` | `dpdknet.Dial()` | ✅ 100% | 支持TCP/UDP/ICMP协议，支持 Option |
 | `net.DialTimeout()` | `dpdknet.DialTimeout()` | ✅ 100% | 带超时的连接 |
 | `net.DialTCP()` | `dpdknet.DialTCP()` | ✅ 100% | TCP专用连接函数 |
 | `net.ListenTCP()` | `dpdknet.ListenTCP()` | ✅ 100% | TCP专用监听函数 |
 | `net.ListenUDP()` | `dpdknet.ListenUDP()` | ✅ 100% | UDP监听函数 |
+| `net.ListenPacket()` | `dpdknet.ListenPacket()` | ✅ 100% | 数据包监听，支持 Option |
 | `net.ListenIP()` | `dpdknet.ListenIP()` | ✅ 100% | IP/ICMP监听函数 |
-| - | `dpdknet.ListenVXLAN()` | ⭐ 扩展 | VXLAN隧道监听 |
-| - | `dpdknet.DialVXLAN()` | ⭐ 扩展 | VXLAN隧道连接 |
+| - | `dpdknet.ListenWithVXLAN()` | ⭐ 扩展 | VXLAN选项监听辅助方法 |
+| - | `dpdknet.DialWithVXLAN()` | ⭐ 扩展 | VXLAN选项连接辅助方法 |
+| - | `dpdknet.ListenPacketWithVXLAN()` | ⭐ 扩展 | VXLAN选项数据包监听辅助方法 |
+| - | `dpdknet.WithVXLAN()` | ⭐ 扩展 | VXLAN配置选项工厂方法 |
 | `net.ListenIP()` | `dpdknet.ListenIP()` | ✅ 100% | IP层连接(支持ICMP) |
 
 ### 地址解析函数 (完全兼容) ✅

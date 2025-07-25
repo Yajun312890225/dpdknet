@@ -36,14 +36,14 @@ func tcpServerExample() {
 		RemoteMAC: net.HardwareAddr{0x00, 0x66, 0x77, 0x88, 0x99, 0xaa},
 	}
 
-	// 使用新的可变参数方式 - VXLAN 作为选项
-	listener, err := dpdknet.Listen("tcp", ":8080", vxlanConfig)
+	// 使用新的 Option 风格 - VXLAN 作为选项
+	listener, err := dpdknet.Listen("tcp", ":8080", dpdknet.WithVXLAN(vxlanConfig))
 	if err != nil {
 		log.Fatalf("Failed to create TCP listener with VXLAN: %v", err)
 	}
 	defer listener.Close()
 
-	fmt.Println("TCP server with VXLAN listening on :8080")
+	fmt.Println("TCP server with VXLAN listening on :8080 (Option 风格)")
 	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
 		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 
@@ -77,14 +77,14 @@ func udpServerExample() {
 		RemoteMAC: net.HardwareAddr{0x00, 0x66, 0x77, 0x88, 0x99, 0xaa},
 	}
 
-	// 使用新的可变参数方式
-	conn, err := dpdknet.ListenPacket("udp", ":9090", vxlanConfig)
+	// 使用新的 Option 风格
+	conn, err := dpdknet.ListenPacket("udp", ":9090", dpdknet.WithVXLAN(vxlanConfig))
 	if err != nil {
 		log.Fatalf("Failed to create UDP connection with VXLAN: %v", err)
 	}
 	defer conn.Close()
 
-	fmt.Println("UDP server with VXLAN listening on :9090")
+	fmt.Println("UDP server with VXLAN listening on :9090 (Option 风格)")
 	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
 		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 
@@ -118,14 +118,14 @@ func tcpClientExample() {
 		RemoteMAC: net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55},
 	}
 
-	// 使用新的可变参数方式
-	conn, err := dpdknet.Dial("tcp", "192.168.1.10:8080", vxlanConfig)
+	// 使用新的 Option 风格
+	conn, err := dpdknet.Dial("tcp", "192.168.1.10:8080", dpdknet.WithVXLAN(vxlanConfig))
 	if err != nil {
 		log.Fatalf("Failed to dial TCP with VXLAN: %v", err)
 	}
 	defer conn.Close()
 
-	fmt.Println("TCP client connected with VXLAN to 192.168.1.10:8080")
+	fmt.Println("TCP client connected with VXLAN to 192.168.1.10:8080 (Option 风格)")
 	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
 		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 

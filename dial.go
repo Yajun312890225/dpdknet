@@ -6,12 +6,32 @@ import (
 	"time"
 )
 
-// Dial connects to the address on the named network.
-func Dial(network, address string, options ...*VXLANConfig) (net.Conn, error) {
-	var vxlanConfig *VXLANConfig
-	if len(options) > 0 {
-		vxlanConfig = options[0]
+// Option 参数设置类型
+type Option func(*options)
+
+type options struct {
+	vxlanConfig *VXLANConfig
+	// 可扩展更多参数
+}
+
+func setDefaultOption() *options {
+	return &options{}
+}
+
+// WithVXLAN 设置 VXLAN 配置
+func WithVXLAN(cfg *VXLANConfig) Option {
+	return func(o *options) {
+		o.vxlanConfig = cfg
 	}
+}
+
+// Dial connects to the address on the named network, with Option 风格。
+func Dial(network, address string, opts ...Option) (net.Conn, error) {
+	o := setDefaultOption()
+	for _, opt := range opts {
+		opt(o)
+	}
+	vxlanConfig := o.vxlanConfig
 
 	switch network {
 	case "tcp", "tcp4", "tcp6":
@@ -34,7 +54,6 @@ func Dial(network, address string, options ...*VXLANConfig) (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		// ICMP 不直接实现 net.Conn，需要特殊处理
 		conn, err := DialICMPWithVXLAN(addr, vxlanConfig)
 		if err != nil {
 			return nil, err
@@ -45,9 +64,9 @@ func Dial(network, address string, options ...*VXLANConfig) (net.Conn, error) {
 	}
 }
 
-// DialWithOptions connects to the address on the named network with options.
-func DialWithOptions(network, address string, vxlanConfig *VXLANConfig) (net.Conn, error) {
-	return Dial(network, address, vxlanConfig)
+// DialWithVXLAN 辅助方法，显式传递 VXLAN 配置。
+func DialWithVXLAN(network, address string, vxlanConfig *VXLANConfig) (net.Conn, error) {
+	return Dial(network, address, WithVXLAN(vxlanConfig))
 }
 
 // DialTimeout acts like Dial but takes a timeout.
