@@ -119,13 +119,13 @@ func tcpClientExample() {
 	}
 
 	// 使用新的 Option 风格
-	conn, err := dpdknet.Dial("tcp", "192.168.1.10:8080", dpdknet.WithVXLAN(vxlanConfig))
+	conn, err := dpdknet.Dial("tcp", "139.155.178.20:32333", dpdknet.WithVXLAN(vxlanConfig))
 	if err != nil {
 		log.Fatalf("Failed to dial TCP with VXLAN: %v", err)
 	}
 	defer conn.Close()
 
-	fmt.Println("TCP client connected with VXLAN to 192.168.1.10:8080 (Option 风格)")
+	fmt.Println("TCP client connected with VXLAN to 139.155.178.20:32333 (Option 风格)")
 	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
 		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 
