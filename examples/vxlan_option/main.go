@@ -110,22 +110,22 @@ func tcpClientExample() {
 
 	// 创建 VXLAN 配置
 	vxlanConfig := &dpdknet.VXLANConfig{
-		VNI:       1000,
-		LocalIP:   net.ParseIP("11.74.225.249"), // 本地 VTEP IP
-		RemoteIP:  net.ParseIP("10.64.12.7"),    // 远程 VTEP IP
+		VNI:       66,
+		LocalIP:   net.ParseIP("192.168.66.75"), // 本地 VTEP IP
+		RemoteIP:  net.ParseIP("192.168.66.29"), // 远程 VTEP IP
 		UDPPort:   4789,                         // VXLAN 端口
 		LocalMAC:  net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55},
 		RemoteMAC: net.HardwareAddr{0x00, 0x66, 0x77, 0x88, 0x99, 0xaa},
 	}
 
 	// 使用新的 Option 风格
-	conn, err := dpdknet.Dial("tcp", "139.155.178.20:32333", dpdknet.WithVXLAN(vxlanConfig))
+	conn, err := dpdknet.Dial("udp", "10.10.10.1:8000", dpdknet.WithVXLAN(vxlanConfig))
 	if err != nil {
-		log.Fatalf("Failed to dial TCP with VXLAN: %v", err)
+		log.Fatalf("Failed to dial UDP with VXLAN: %v", err)
 	}
 	defer conn.Close()
 
-	fmt.Println("TCP client connected with VXLAN to 139.155.178.20:32333 (Option 风格)")
+	fmt.Println("UDP client connected with VXLAN to 10.10.10.1:8000 (Option 风格)")
 	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
 		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 
