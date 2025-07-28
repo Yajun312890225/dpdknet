@@ -218,17 +218,18 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 
 // DialTCPWithVXLAN 创建带 VXLAN 封装的 TCP 连接
 func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr, vxlanConfig *VXLANConfig) (*TCPConn, error) {
+	fmt.Println(1111)
 	conn, err := DialTCP(network, laddr, raddr)
 	if err != nil {
 		return nil, err
 	}
-
+	fmt.Println(2222)
 	if vxlanConfig != nil {
 		conn.vxlanConfig = vxlanConfig
 		conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
 		log.Printf("[INFO] TCP connection enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
 	}
-
+	fmt.Println(3333)
 	return conn, nil
 }
 
