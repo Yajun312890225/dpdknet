@@ -148,7 +148,7 @@ func tcpClientExample() {
 		log.Fatalf("Failed to resolve inner local address: %v", err)
 	}
 
-	conn, err := dpdknet.Dial("udp", "8.137.60.31:12345",
+	conn, err := dpdknet.Dial("udp", "192.168.66.29:8000",
 		dpdknet.WithLocalAddr(innerLocalAddr),
 		dpdknet.WithVXLAN(vxlanConfig))
 	if err != nil {
@@ -164,7 +164,7 @@ func tcpClientExample() {
 
 	// 发送数据
 	fmt.Println("4. 发送测试数据...")
-	message := "Hello from VXLAN client!"
+	message := "Hello"
 
 	fmt.Printf("  准备发送消息: %s\n", message)
 	fmt.Printf("  使用 VXLAN 配置:\n")
