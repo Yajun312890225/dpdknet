@@ -20,14 +20,117 @@ type VXLANConfig struct {
 	UDPPort   uint16           // VXLAN UDP 端口，默认 4789
 	LocalMAC  net.HardwareAddr // 本地 MAC 地址
 	RemoteMAC net.HardwareAddr // 远程 MAC 地址
+
+	// ARP缓存，用于存储内层网络的IP到MAC映射
+	ARPCache map[string]net.HardwareAddr // key: IP地址字符串, value: MAC地址
+	ARPMutex sync.RWMutex                // 保护ARP缓存的读写锁
 }
 
 // DefaultVXLANConfig 默认 VXLAN 配置
 func DefaultVXLANConfig() *VXLANConfig {
 	return &VXLANConfig{
-		VNI:     1000,
-		UDPPort: 4789, // IANA 分配的 VXLAN 端口
+		VNI:      1000,
+		UDPPort:  4789, // IANA 分配的 VXLAN 端口
+		ARPCache: make(map[string]net.HardwareAddr),
 	}
+}
+
+// GetMACFromARP 从ARP缓存或系统ARP表获取MAC地址
+func (config *VXLANConfig) GetMACFromARP(ip net.IP) net.HardwareAddr {
+	if config.ARPCache == nil {
+		config.ARPCache = make(map[string]net.HardwareAddr)
+	}
+
+	ipStr := ip.String()
+
+	// 首先检查缓存
+	config.ARPMutex.RLock()
+	if mac, exists := config.ARPCache[ipStr]; exists {
+		config.ARPMutex.RUnlock()
+		return mac
+	}
+	config.ARPMutex.RUnlock()
+
+	// 缓存中没有，从系统ARP表查询
+	mac := querySystemARP(ipStr)
+
+	// 将结果存入缓存
+	config.ARPMutex.Lock()
+	config.ARPCache[ipStr] = mac
+	config.ARPMutex.Unlock()
+
+	log.Printf("[ARP] 缓存IP %s 的MAC地址: %s", ipStr, mac)
+	return mac
+}
+
+// ClearARPCache 清空ARP缓存
+func (config *VXLANConfig) ClearARPCache() {
+	config.ARPMutex.Lock()
+	defer config.ARPMutex.Unlock()
+	config.ARPCache = make(map[string]net.HardwareAddr)
+}
+
+// SetARPEntry 手动设置ARP条目
+func (config *VXLANConfig) SetARPEntry(ip net.IP, mac net.HardwareAddr) {
+	if config.ARPCache == nil {
+		config.ARPCache = make(map[string]net.HardwareAddr)
+	}
+
+	config.ARPMutex.Lock()
+	defer config.ARPMutex.Unlock()
+	config.ARPCache[ip.String()] = mac
+	log.Printf("[ARP] 手动设置ARP条目: %s -> %s", ip.String(), mac)
+}
+
+// querySystemARP 查询系统ARP表获取MAC地址
+func querySystemARP(ipStr string) net.HardwareAddr {
+	// 先尝试ping来触发ARP
+	exec.Command("ping", "-c", "1", "-W", "1", ipStr).Run()
+
+	// 查询ARP表
+	cmd := exec.Command("arp", "-n", ipStr)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Printf("[ARP] 查询ARP表失败 %s: %v，使用虚拟MAC", ipStr, err)
+		return generateVirtualMAC(ipStr)
+	}
+
+	// 解析ARP输出
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[0] == ipStr {
+			// 格式通常是: IP ... MAC ...
+			for _, field := range fields {
+				if strings.Contains(field, ":") && len(field) == 17 {
+					mac, err := net.ParseMAC(field)
+					if err == nil {
+						log.Printf("[ARP] 从系统ARP表获取到 %s 的MAC: %s", ipStr, mac)
+						return mac
+					}
+				}
+			}
+		}
+	}
+
+	log.Printf("[ARP] 系统ARP表中未找到 %s，使用虚拟MAC", ipStr)
+	return generateVirtualMAC(ipStr)
+}
+
+// generateVirtualMAC 为找不到ARP记录的IP生成虚拟MAC
+func generateVirtualMAC(ipStr string) net.HardwareAddr {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+	}
+
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
+	}
+
+	// 使用02:ff前缀表示这是一个虚拟MAC地址
+	return net.HardwareAddr{0x02, 0xff, ip4[0], ip4[1], ip4[2], ip4[3]}
 }
 
 // VXLANHandler VXLAN 处理器
@@ -86,8 +189,8 @@ func (vh *VXLANHandler) EncapsulateVXLAN(innerPayload []byte, innerSrcIP, innerD
 
 	// 5. 构建内层以太网头
 	innerEthLayer := &layers.Ethernet{
-		SrcMAC:       generateInnerMAC(innerSrcIP), // 基于内层 IP 生成 MAC
-		DstMAC:       generateInnerMAC(innerDstIP), // 基于内层 IP 生成 MAC
+		SrcMAC:       generateInnerSrcMAC(innerSrcIP),     // 为源IP生成虚拟MAC
+		DstMAC:       vh.config.GetMACFromARP(innerDstIP), // 为目标IP使用ARP查询MAC
 		EthernetType: layers.EthernetTypeIPv4,
 	}
 
@@ -110,19 +213,20 @@ func (vh *VXLANHandler) EncapsulateVXLAN(innerPayload []byte, innerSrcIP, innerD
 	return buf.Bytes(), nil
 }
 
-// generateInnerMAC 基于内层 IP 生成虚拟 MAC 地址
-func generateInnerMAC(ip net.IP) net.HardwareAddr {
+// generateInnerSrcMAC 为内层源IP生成虚拟MAC地址
+func generateInnerSrcMAC(ip net.IP) net.HardwareAddr {
 	if ip == nil {
 		return net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
 	}
 
-	// 对特定IP使用固定MAC
-	if ip.String() == "10.10.10.1" {
-		return net.HardwareAddr{0xd8, 0x85, 0xc0, 0xa8, 0x42, 0x1d}
+	// 对于其他11.x.x.x网段的地址，使用统一的MAC模式
+	ip4 := ip.To4()
+	if ip4 != nil && ip4[0] == 11 {
+		// 为11网段使用特殊的MAC前缀
+		return net.HardwareAddr{0x02, 0x11, ip4[1], ip4[2], ip4[3], 0x00}
 	}
 
-	// 使用 IP 的最后4个字节生成 MAC（前缀02:00表示本地管理地址）
-	ip4 := ip.To4()
+	// 默认情况：使用 IP 的最后4个字节生成 MAC（前缀02:00表示本地管理地址）
 	if ip4 == nil {
 		return net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
 	}
@@ -422,8 +526,8 @@ func extractVNIFromPacket(data []byte) (uint32, error) {
 func constructInnerIPPacket(payload []byte, srcIP, dstIP net.IP, srcPort, dstPort uint16, protocol layers.IPProtocol) []byte {
 	// 创建以太网帧
 	ethLayer := &layers.Ethernet{
-		SrcMAC:       generateInnerMAC(srcIP),
-		DstMAC:       generateInnerMAC(dstIP),
+		SrcMAC:       generateInnerSrcMAC(srcIP),         // 源MAC使用虚拟MAC
+		DstMAC:       generateVirtualMAC(dstIP.String()), // 目标MAC暂时使用虚拟MAC，后续可优化
 		EthernetType: layers.EthernetTypeIPv4,
 	}
 

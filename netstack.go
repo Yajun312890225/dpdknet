@@ -445,22 +445,6 @@ func (gvs *GVisorNetstack) checkNeedVXLANEncapsulation(ipPacket []byte) *VXLANCo
 		return config
 	}
 
-	// 如果找不到精确匹配，尝试通过目标网络段匹配 VXLAN 配置
-	// 检查是否有适合此目标网段的 VXLAN 配置
-	gvs.vxlanMutex.RLock()
-	for key, config := range gvs.vxlanConnections {
-		gvs.vxlanMutex.RUnlock()
-		// 检查目标IP是否在10.10.10.0/24网段内（VXLAN内层网络）
-		if dstIP.String() == "10.10.10.1" && dstPort == 12345 {
-			log.Printf("[DEBUG] 匹配内层网络 VXLAN 配置: %s (key: %s)", dstIP, key)
-			gvs.vxlanMutex.RLock()
-			defer gvs.vxlanMutex.RUnlock()
-			return config
-		}
-		gvs.vxlanMutex.RLock()
-	}
-	gvs.vxlanMutex.RUnlock()
-
 	return nil
 }
 

@@ -133,6 +133,14 @@ func tcpClientExample() {
 		UDPPort:   4789,                                 // VXLAN 端口
 		LocalMAC:  dpdknet.GetLocalMAC(),                // 使用 DPDK 启动时获取的 MAC
 		RemoteMAC: getRemoteMACFromARP("192.168.66.29"), // 远端 VTEP 的 MAC
+		ARPCache:  make(map[string]net.HardwareAddr),    // 初始化ARP缓存
+	}
+
+	// 预先设置一些已知的ARP条目
+	// 这样可以避免在数据包发送时进行ARP查询延迟
+	targetIP := net.ParseIP("192.168.66.29")
+	if targetMAC := getRemoteMACFromARP("192.168.66.29"); targetMAC != nil {
+		vxlanConfig.SetARPEntry(targetIP, targetMAC)
 	}
 
 	// 验证 VXLAN 配置

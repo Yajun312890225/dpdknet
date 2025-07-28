@@ -236,17 +236,6 @@ func (ah *ARPHandler) RequestMAC(targetIP net.IP) (net.HardwareAddr, error) {
 		return mac, nil
 	}
 
-	// 处理特定IP的MAC映射
-	// 根据您的需求：10.10.10.2 应该回复特定的MAC地址
-	if targetIP.Equal(net.ParseIP("10.10.10.2")) {
-		// 这里是网关地址，我们可能需要特殊处理
-		// 或者发送ARP请求让网关回复
-		gatewayMAC := net.HardwareAddr{0xd8, 0x85, 0xc0, 0xa8, 0x42, 0x1d} // 您指定的远端MAC
-		ah.arpTable.AddEntry(targetIP, gatewayMAC)
-		log.Printf("[ARP] 为网关 %s 设置固定MAC: %s", targetIP.String(), gatewayMAC.String())
-		return gatewayMAC, nil
-	}
-
 	// ARP表中没有，发送ARP请求
 	log.Printf("[ARP] ARP表中未找到 %s，发送ARP请求", targetIP.String())
 	err := ah.SendARPRequest(targetIP)
