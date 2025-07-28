@@ -91,70 +91,15 @@ func (vh *VXLANHandler) EncapsulateVXLAN(innerPayload []byte, innerSrcIP, innerD
 		EthernetType: layers.EthernetTypeIPv4,
 	}
 
-	// 6. 重新构建内层IP包，使用映射后的地址
-	innerIPLayer := &layers.IPv4{
-		Version:  4,
-		IHL:      5,
-		TTL:      64,
-		Protocol: protocol,
-		SrcIP:    innerSrcIP,
-		DstIP:    innerDstIP,
+	// 6. 直接使用原始内层 IP 包数据，而不是重新构建
+	// 序列化外层结构
+	layersToSerialize := []gopacket.SerializableLayer{
+		ethLayer, ipLayer, udpLayer, vxlanLayer, innerEthLayer,
 	}
 
-	// 7. 根据协议类型构建内层传输层和有效载荷
-	var layersToSerialize []gopacket.SerializableLayer
-	layersToSerialize = append(layersToSerialize, ethLayer, ipLayer, udpLayer, vxlanLayer, innerEthLayer, innerIPLayer)
-
-	switch protocol {
-	case layers.IPProtocolUDP:
-		// 构建内层 UDP 头
-		innerUDPLayer := &layers.UDP{
-			SrcPort: layers.UDPPort(innerSrcPort),
-			DstPort: layers.UDPPort(innerDstPort),
-		}
-		innerUDPLayer.SetNetworkLayerForChecksum(innerIPLayer)
-		layersToSerialize = append(layersToSerialize, innerUDPLayer)
-
-		// 提取原始UDP载荷
-		if len(innerPayload) >= 28 { // IP头20字节 + UDP头8字节
-			ipHeaderLen := (innerPayload[0] & 0x0F) * 4
-			udpPayload := innerPayload[ipHeaderLen+8:]
-			if len(udpPayload) > 0 {
-				layersToSerialize = append(layersToSerialize, gopacket.Payload(udpPayload))
-			}
-		}
-
-	case layers.IPProtocolTCP:
-		// 对于TCP，我们需要重新构建TCP头
-		innerTCPLayer := &layers.TCP{
-			SrcPort: layers.TCPPort(innerSrcPort),
-			DstPort: layers.TCPPort(innerDstPort),
-			Seq:     1,
-			Window:  8192,
-		}
-		innerTCPLayer.SetNetworkLayerForChecksum(innerIPLayer)
-		layersToSerialize = append(layersToSerialize, innerTCPLayer)
-
-		// 提取原始TCP载荷
-		if len(innerPayload) >= 40 { // IP头20字节 + TCP头最少20字节
-			ipHeaderLen := (innerPayload[0] & 0x0F) * 4
-			tcpHeaderLen := ((innerPayload[ipHeaderLen+12] & 0xF0) >> 4) * 4
-			tcpPayload := innerPayload[ipHeaderLen+tcpHeaderLen:]
-			if len(tcpPayload) > 0 {
-				layersToSerialize = append(layersToSerialize, gopacket.Payload(tcpPayload))
-			}
-		}
-
-	case layers.IPProtocolICMPv4:
-		// 对于 ICMP，直接使用原始载荷
-		if len(innerPayload) >= 20 { // IP头20字节
-			ipHeaderLen := (innerPayload[0] & 0x0F) * 4
-			icmpPayload := innerPayload[ipHeaderLen:]
-			if len(icmpPayload) > 0 {
-				layersToSerialize = append(layersToSerialize, gopacket.Payload(icmpPayload))
-			}
-		}
-	}
+	// 创建payload层包含原始内层IP数据
+	payloadLayer := gopacket.Payload(innerPayload)
+	layersToSerialize = append(layersToSerialize, payloadLayer)
 
 	// 序列化所有层
 	err := gopacket.SerializeLayers(buf, opts, layersToSerialize...)
@@ -172,7 +117,7 @@ func generateInnerMAC(ip net.IP) net.HardwareAddr {
 	}
 
 	// 对特定IP使用固定MAC
-	if ip.String() == "10.10.10.2" {
+	if ip.String() == "10.10.10.1" {
 		return net.HardwareAddr{0xd8, 0x85, 0xc0, 0xa8, 0x42, 0x1d}
 	}
 
