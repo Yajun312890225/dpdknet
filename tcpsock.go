@@ -210,19 +210,75 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 			}
 		}
 	}
-	fmt.Println("5")
 	return tcpConn, nil
 }
 
 // DialTCPWithVXLAN 创建带 VXLAN 封装的 TCP 连接
 func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr, vxlanConfig *VXLANConfig) (*TCPConn, error) {
+	if vxlanConfig == nil {
+		// 如果没有 VXLAN 配置，回退到普通 TCP
+		return DialTCP(network, laddr, raddr)
+	}
 
-	// 如果有 VXLAN 配置，先注册 VXLAN 连接
-	if vxlanConfig != nil && globalGVisorStack != nil {
-		// 注册本地端口的 VXLAN 配置
+	// VXLAN 场景：raddr 是内层目标地址，实际的外层通信在 VTEP 之间进行
+	// 1. 创建本地 TCP 监听器，绑定到 VXLAN 本地地址
+	vxlanLocalAddr := &TCPAddr{
+		IP:   vxlanConfig.LocalIP, // 使用 VXLAN 本地 VTEP IP
+		Port: 0,                   // 让系统分配端口
+	}
+
+	// 如果用户指定了本地地址，使用用户指定的端口
+	if laddr != nil && laddr.Port != 0 {
+		vxlanLocalAddr.Port = laddr.Port
+	}
+
+	// 2. 创建 TCP 连接 - 在 VXLAN 场景下使用内层地址
+	var gvisorConn net.Conn
+	var actualLocalAddr *TCPAddr
+
+	if laddr != nil {
+		// 如果指定了内层本地地址，使用它创建 gVisor 连接
+		remoteAddr := &net.TCPAddr{
+			IP:   raddr.IP,
+			Port: raddr.Port,
+			Zone: raddr.Zone,
+		}
+		var err error
+		gvisorConn, err = CreateGVisorTCPConnWithLocalAddr(laddr.IP, uint16(laddr.Port), remoteAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gVisor TCP connection with local addr %s:%d: %v", laddr.IP, laddr.Port, err)
+		}
+		actualLocalAddr = laddr
+	} else {
+		// 否则使用外层 VTEP 地址
+		remoteAddr := &net.TCPAddr{
+			IP:   raddr.IP,
+			Port: raddr.Port,
+			Zone: raddr.Zone,
+		}
+		var err error
+		gvisorConn, err = CreateGVisorTCPConn(nil, remoteAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gVisor TCP connection: %v", err)
+		}
+		actualLocalAddr = vxlanLocalAddr
+	}
+
+	conn := &TCPConn{
+		localAddr:  actualLocalAddr,
+		remoteAddr: raddr,
+		gvisorConn: gvisorConn,
+	}
+
+	// 3. 配置 VXLAN
+	conn.vxlanConfig = vxlanConfig
+	conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
+
+	// 4. 注册 VXLAN 连接
+	if globalGVisorStack != nil {
 		localPort := uint16(0)
-		if laddr != nil {
-			localPort = uint16(laddr.Port)
+		if actualLocalAddr != nil {
+			localPort = uint16(actualLocalAddr.Port)
 		}
 		globalGVisorStack.RegisterVXLANConnection(
 			vxlanConfig.LocalIP,
@@ -233,15 +289,7 @@ func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr, vxlanConfig *VXLANC
 			vxlanConfig.LocalIP, localPort, vxlanConfig.VNI)
 	}
 
-	conn, err := DialTCP(network, laddr, raddr)
-	if err != nil {
-		return nil, err
-	}
-	if vxlanConfig != nil {
-		conn.vxlanConfig = vxlanConfig
-		conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
-		log.Printf("[INFO] TCP connection enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
-	}
+	log.Printf("[INFO] TCP connection enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
 	return conn, nil
 }
 

@@ -19,10 +19,13 @@ func main() {
 	// 示例2: UDP 服务器带 VXLAN 封装
 	// udpServerExample()
 
-	// 示例3: TCP 客户端带 VXLAN 封装
+	// 示例3: UDP 客户端带 VXLAN 封装
+	// udpClientExample()
+
+	// 示例4: TCP 客户端带 VXLAN 封装
 	tcpClientExample()
 
-	// 示例4: ICMP 客户端带 VXLAN 封装 (TODO: 实现)
+	// 示例5: ICMP 客户端带 VXLAN 封装 (TODO: 实现)
 	// icmpClientExample()
 }
 
@@ -64,7 +67,7 @@ func tcpServerExample() {
 	}
 	// }()
 
-	// time.S`leep(1 * time.Second) // 让服务器运行一会儿
+	// time.Sleep(1 * time.Second) // 让服务器运行一会儿
 }
 
 func udpServerExample() {
@@ -108,7 +111,7 @@ func udpServerExample() {
 	time.Sleep(1 * time.Second)
 }
 
-func tcpClientExample() {
+func udpClientExample() {
 	fmt.Println("\n=== TCP Client with VXLAN Example ===")
 
 	// 设置环境变量确保 DPDK 和 gVisor 使用正确的外层 VTEP IP
@@ -121,19 +124,15 @@ func tcpClientExample() {
 		log.Fatalf("网络初始化失败: %v", err)
 	}
 
-	// 首先检查网络连通性
-	fmt.Println("1. 检查网络连通性...")
-	testNetworkConnectivity()
-
 	// 创建 VXLAN 配置
 	vxlanConfig := &dpdknet.VXLANConfig{
-		VNI:       66,
-		LocalIP:   net.ParseIP("192.168.66.57"),         // 外层本地VTEP IP
-		RemoteIP:  net.ParseIP("192.168.66.29"),         // 外层远程VTEP IP
-		UDPPort:   4789,                                 // VXLAN 端口
-		LocalMAC:  dpdknet.GetLocalMAC(),                // 使用 DPDK 启动时获取的 MAC
-		RemoteMAC: getRemoteMACFromARP("192.168.66.29"), // 远端 VTEP 的 MAC
-		ARPCache:  make(map[string]net.HardwareAddr),    // 初始化ARP缓存
+		VNI:      66,
+		LocalIP:  net.ParseIP("192.168.66.57"), // 外层本地VTEP IP
+		RemoteIP: net.ParseIP("192.168.66.29"), // 外层远程VTEP IP
+		UDPPort:  4789,                         // VXLAN 端口
+		LocalMAC: dpdknet.GetLocalMAC(),        // 使用 DPDK 启动时获取的 MAC
+		// RemoteMAC: getRemoteMACFromARP("192.168.66.29"), // 远端 VTEP 的 MAC
+		ARPCache: make(map[string]net.HardwareAddr), // 初始化ARP缓存
 	}
 
 	// 预先设置一些已知的ARP条目
@@ -141,14 +140,8 @@ func tcpClientExample() {
 	targetIP := net.ParseIP("192.168.66.29")
 	if targetMAC := getRemoteMACFromARP("192.168.66.29"); targetMAC != nil {
 		vxlanConfig.SetARPEntry(targetIP, targetMAC)
+		vxlanConfig.RemoteMAC = targetMAC
 	}
-
-	// 验证 VXLAN 配置
-	fmt.Println("2. 验证 VXLAN 配置...")
-	validateVXLANConfig(vxlanConfig)
-
-	// 使用新的 Option 风格创建VXLAN连接
-	fmt.Println("\n3. 创建 VXLAN UDP 连接...")
 
 	// 创建内层本地地址（OSPF 网络地址）
 	innerLocalAddr, err := dpdknet.ResolveUDPAddr("udp", "11.1.1.2:0") // 将自动在gVisor中配置此地址
@@ -164,14 +157,12 @@ func tcpClientExample() {
 	}
 	defer conn.Close()
 
-	fmt.Println("UDP client connected with VXLAN to 8.137.60.31:12345")
-	fmt.Printf("Inner Local Address: %s, Remote Address: %s\n", innerLocalAddr, "8.137.60.31:12345")
 	fmt.Printf("Outer VTEP: %s -> %s\n", vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
 		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 
 	// 发送数据
-	fmt.Println("4. 发送测试数据...")
+	fmt.Println("发送测试数据...")
 	message := "Hello"
 
 	fmt.Printf("  准备发送消息: %s\n", message)
@@ -325,40 +316,6 @@ func getLocalMAC(localIP string) net.HardwareAddr {
 	return net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
 }
 
-func resolveRemoteMAC(remoteIP net.IP) net.HardwareAddr {
-	// 先尝试 ping 来确保 ARP 表有记录
-	fmt.Printf("    执行 ping 来触发 ARP...\n")
-	exec.Command("ping", "-c", "1", "-W", "1", remoteIP.String()).Run()
-
-	// 查询 ARP 表
-	cmd := exec.Command("arp", "-n", remoteIP.String())
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("    ❌ ARP 查询失败: %v\n", err)
-		return net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	}
-
-	// 解析 ARP 输出
-	lines := strings.Split(string(output), "\n")
-	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) >= 3 && fields[0] == remoteIP.String() {
-			// 格式通常是: IP ... MAC ...
-			for _, field := range fields {
-				if strings.Contains(field, ":") && len(field) == 17 {
-					mac, err := net.ParseMAC(field)
-					if err == nil {
-						return mac
-					}
-				}
-			}
-		}
-	}
-
-	fmt.Printf("    ❌ 未找到 ARP 记录，使用广播 MAC\n")
-	return net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-}
-
 // getRemoteMACFromARP 从 ARP 表获取远端 MAC 地址
 func getRemoteMACFromARP(remoteIP string) net.HardwareAddr {
 	// 先尝试 ping 来确保 ARP 表有记录
@@ -393,4 +350,106 @@ func getRemoteMACFromARP(remoteIP string) net.HardwareAddr {
 
 	fmt.Printf("    ❌ 未找到 ARP 记录，使用默认 MAC\n")
 	return net.HardwareAddr{0xd8, 0x85, 0xc0, 0xa8, 0x42, 0x1d}
+}
+
+func tcpClientExample() {
+	fmt.Println("\n=== TCP Client with VXLAN Example ===")
+
+	// 设置环境变量确保 DPDK 和 gVisor 使用正确的外层 VTEP IP
+	localVTEP := "192.168.66.57"
+	os.Setenv("DPDKNET_LOCAL_IP", localVTEP)
+	fmt.Printf("设置 DPDKNET_LOCAL_IP=%s (外层 VTEP 地址)\n", localVTEP)
+
+	// 确保在创建连接前先初始化网络系统（这会使用新的环境变量）
+	if err := dpdknet.EnsureGlobalNetworkInit(); err != nil {
+		log.Fatalf("网络初始化失败: %v", err)
+	}
+
+	// 创建 VXLAN 配置
+	vxlanConfig := &dpdknet.VXLANConfig{
+		VNI:      66,
+		LocalIP:  net.ParseIP("192.168.66.57"), // 外层本地VTEP IP
+		RemoteIP: net.ParseIP("192.168.66.29"), // 外层远程VTEP IP
+		UDPPort:  4789,                         // VXLAN 端口
+		LocalMAC: dpdknet.GetLocalMAC(),        // 使用 DPDK 启动时获取的 MAC
+		// RemoteMAC: getRemoteMACFromARP("192.168.66.29"), // 远端 VTEP 的 MAC
+		ARPCache: make(map[string]net.HardwareAddr), // 初始化ARP缓存
+	}
+
+	// 预先设置一些已知的ARP条目
+	// 这样可以避免在数据包发送时进行ARP查询延迟
+	targetIP := net.ParseIP("192.168.66.29")
+	if targetMAC := getRemoteMACFromARP("192.168.66.29"); targetMAC != nil {
+		vxlanConfig.SetARPEntry(targetIP, targetMAC)
+		vxlanConfig.RemoteMAC = targetMAC
+	}
+
+	// 创建内层本地地址（OSPF 网络地址）
+	innerLocalAddr, err := dpdknet.ResolveTCPAddr("tcp", "11.1.1.2:0") // 将自动在gVisor中配置此地址
+	if err != nil {
+		log.Fatalf("Failed to resolve inner local address: %v", err)
+	}
+
+	conn, err := dpdknet.Dial("tcp", "192.168.66.29:8000",
+		dpdknet.WithLocalAddr(innerLocalAddr),
+		dpdknet.WithVXLAN(vxlanConfig))
+	if err != nil {
+		log.Fatalf("Failed to dial TCP with VXLAN: %v", err)
+	}
+	defer conn.Close()
+
+	fmt.Printf("Outer VTEP: %s -> %s\n", vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
+	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
+		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
+
+	// 发送数据
+	fmt.Println("发送测试数据...")
+	message := "Hello from TCP Client"
+
+	fmt.Printf("  准备发送消息: %s\n", message)
+	fmt.Printf("  使用 VXLAN 配置:\n")
+	fmt.Printf("    本地 VTEP: %s (MAC: %s)\n", vxlanConfig.LocalIP, vxlanConfig.LocalMAC)
+	fmt.Printf("    远程 VTEP: %s (MAC: %s)\n", vxlanConfig.RemoteIP, vxlanConfig.RemoteMAC)
+	fmt.Printf("    VNI: %d, UDP 端口: %d\n", vxlanConfig.VNI, vxlanConfig.UDPPort)
+
+	_, err = conn.Write([]byte(message))
+	if err != nil {
+		log.Printf("Write error: %v", err)
+		return
+	}
+
+	fmt.Printf("  ✅ TCP 数据写入成功\n")
+
+	// 尝试读取响应
+	fmt.Println("  等待服务器响应...")
+	buffer := make([]byte, 1024)
+
+	// 使用goroutine和channel实现超时读取
+	resultCh := make(chan struct {
+		n   int
+		err error
+	}, 1)
+
+	go func() {
+		n, err := conn.Read(buffer)
+		resultCh <- struct {
+			n   int
+			err error
+		}{n, err}
+	}()
+
+	select {
+	case result := <-resultCh:
+		if result.err != nil {
+			log.Printf("Read error: %v", result.err)
+		} else {
+			fmt.Printf("  收到服务器响应: %s\n", string(buffer[:result.n]))
+		}
+	case <-time.After(5 * time.Second):
+		fmt.Printf("  读取超时，可能服务器未响应\n")
+	}
+
+	// 等待一段时间让数据包发送完成
+	time.Sleep(500 * time.Millisecond)
+	fmt.Println("TCP 客户端测试完成，完整的网络协议栈测试完成")
 }

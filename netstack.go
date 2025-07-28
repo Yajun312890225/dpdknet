@@ -1,6 +1,7 @@
 package dpdknet
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -681,6 +682,36 @@ func (gvs *GVisorNetstack) CreateTCPConnWithTimeout(localAddr, remoteAddr *net.T
 	}
 }
 
+// CreateTCPConnWithLocalAddr 创建指定本地地址的 TCP 连接
+func (gvs *GVisorNetstack) CreateTCPConnWithLocalAddr(localIP net.IP, localPort uint16, remoteAddr *net.TCPAddr) (net.Conn, error) {
+	// 检查本地IP是否已经在网络栈中配置
+	err := gvs.ensureIPAddressConfigured(localIP)
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure local IP %s: %v", localIP, err)
+	}
+
+	localFullAddr := tcpip.FullAddress{
+		NIC:  defaultNICID,
+		Addr: tcpip.AddrFromSlice(localIP.To4()),
+		Port: localPort,
+	}
+
+	remoteFullAddr := tcpip.FullAddress{
+		NIC:  defaultNICID,
+		Addr: tcpip.AddrFromSlice(remoteAddr.IP.To4()),
+		Port: uint16(remoteAddr.Port),
+	}
+
+	conn, err := gonet.DialTCPWithBind(context.Background(), gvs.stack, localFullAddr, remoteFullAddr, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create TCP connection with local addr %s:%d: %v", localIP, localPort, err)
+	}
+
+	gvs.stats.TCPConnections++
+	gvs.stats.ActiveConnections++
+	return conn, nil
+}
+
 // GetStats 获取统计信息
 func (gvs *GVisorNetstack) GetStats() GVisorStats {
 	gvs.mu.RLock()
@@ -760,6 +791,15 @@ func CreateGVisorTCPConnWithTimeout(localAddr, remoteAddr *net.TCPAddr, timeout 
 		return nil, fmt.Errorf("gVisor netstack not initialized")
 	}
 	return gvs.CreateTCPConnWithTimeout(localAddr, remoteAddr, timeout)
+}
+
+// CreateGVisorTCPConnWithLocalAddr 通过 gVisor netstack 创建指定本地地址的 TCP 连接
+func CreateGVisorTCPConnWithLocalAddr(localIP net.IP, localPort uint16, remoteAddr *net.TCPAddr) (net.Conn, error) {
+	gvs := GetGVisorNetstack()
+	if gvs == nil {
+		return nil, fmt.Errorf("gVisor netstack not initialized")
+	}
+	return gvs.CreateTCPConnWithLocalAddr(localIP, localPort, remoteAddr)
 }
 
 // ProcessDPDKPacket 处理来自 DPDK 的数据包（全局入口）
