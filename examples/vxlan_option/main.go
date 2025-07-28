@@ -128,11 +128,11 @@ func tcpClientExample() {
 	// 创建 VXLAN 配置
 	vxlanConfig := &dpdknet.VXLANConfig{
 		VNI:       66,
-		LocalIP:   net.ParseIP("192.168.66.57"),                         // 外层本地VTEP IP
-		RemoteIP:  net.ParseIP("192.168.66.29"),                         // 外层远程VTEP IP
-		UDPPort:   4789,                                                 // VXLAN 端口
-		LocalMAC:  net.HardwareAddr{0x11, 0x22, 0x33, 0x00, 0x00, 0x00}, // 内层本地MAC
-		RemoteMAC: net.HardwareAddr{0xd8, 0x85, 0xc0, 0xa8, 0x42, 0x1d}, // 内层远程MAC (固定)
+		LocalIP:   net.ParseIP("192.168.66.57"),         // 外层本地VTEP IP
+		RemoteIP:  net.ParseIP("192.168.66.29"),         // 外层远程VTEP IP
+		UDPPort:   4789,                                 // VXLAN 端口
+		LocalMAC:  dpdknet.GetLocalMAC(),                // 使用 DPDK 启动时获取的 MAC
+		RemoteMAC: getRemoteMACFromARP("192.168.66.29"), // 远端 VTEP 的 MAC
 	}
 
 	// 验证 VXLAN 配置
@@ -148,7 +148,7 @@ func tcpClientExample() {
 	}
 	defer conn.Close()
 
-	fmt.Println("UDP client connected with VXLAN to 10.10.10.1:12345")
+	fmt.Println("UDP client connected with VXLAN to 8.137.60.31:12345")
 	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
 		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 
@@ -339,4 +339,40 @@ func resolveRemoteMAC(remoteIP net.IP) net.HardwareAddr {
 
 	fmt.Printf("    ❌ 未找到 ARP 记录，使用广播 MAC\n")
 	return net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+}
+
+// getRemoteMACFromARP 从 ARP 表获取远端 MAC 地址
+func getRemoteMACFromARP(remoteIP string) net.HardwareAddr {
+	// 先尝试 ping 来确保 ARP 表有记录
+	fmt.Printf("    执行 ping 来触发 ARP...\n")
+	exec.Command("ping", "-c", "1", "-W", "1", remoteIP).Run()
+
+	// 查询 ARP 表
+	cmd := exec.Command("arp", "-n", remoteIP)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Printf("    ❌ ARP 查询失败: %v，使用默认 MAC\n", err)
+		return net.HardwareAddr{0xd8, 0x85, 0xc0, 0xa8, 0x42, 0x1d}
+	}
+
+	// 解析 ARP 输出
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[0] == remoteIP {
+			// 格式通常是: IP ... MAC ...
+			for _, field := range fields {
+				if strings.Contains(field, ":") && len(field) == 17 {
+					mac, err := net.ParseMAC(field)
+					if err == nil {
+						fmt.Printf("    ✅ 从 ARP 表获取到 %s 的 MAC: %s\n", remoteIP, mac)
+						return mac
+					}
+				}
+			}
+		}
+	}
+
+	fmt.Printf("    ❌ 未找到 ARP 记录，使用默认 MAC\n")
+	return net.HardwareAddr{0xd8, 0x85, 0xc0, 0xa8, 0x42, 0x1d}
 }

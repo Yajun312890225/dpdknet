@@ -261,12 +261,17 @@ func CreateVXLANTunnel(localIP, remoteIP net.IP, vni uint32) *VXLANConfig {
 	}
 }
 
-// getLocalMAC 获取本地 MAC 地址
-func getLocalMAC() net.HardwareAddr {
+// GetLocalMAC 获取本地 MAC 地址（从 DPDK 启动时获取的 MAC）
+func GetLocalMAC() net.HardwareAddr {
 	// 使用全局的 localMAC
 	mac := make(net.HardwareAddr, 6)
 	copy(mac, localMAC[:])
 	return mac
+}
+
+// getLocalMAC 获取本地 MAC 地址（内部使用）
+func getLocalMAC() net.HardwareAddr {
+	return GetLocalMAC()
 }
 
 // getRemoteMACFromARP 通过 ARP 表获取远程 MAC 地址

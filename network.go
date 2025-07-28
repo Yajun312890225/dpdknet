@@ -95,6 +95,7 @@ func initializeGlobalNetwork() error {
 	log.Printf("[DEBUG] RX packet handler set")
 
 	localMAC = flow.GetPortMACAddress(dpdkPort)
+	log.Printf("[DEBUG] Local MAC address: %s", net.HardwareAddr(localMAC[:]).String())
 	// 关闭接收流
 	if err := flow.SetSender(rxFlow, dpdkPort); err != nil {
 		log.Printf("[ERROR] Failed to set RX sender: %v", err)
@@ -173,16 +174,7 @@ func initializeVXLANNetworkStack() error {
 	dhcpOffer, err = dhcpClient.SendDHCPDiscover(5 * time.Second) // 5秒超时
 	if err != nil {
 		log.Printf("[VXLAN] DHCP Discover 失败，使用默认配置: %v", err)
-		// 使用默认配置
-		dhcpOffer = &DHCPOfferInfo{
-			YourIP:     net.ParseIP("10.10.10.1"),
-			Gateway:    net.ParseIP("10.10.10.2"),
-			GatewayMAC: net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x02}, // 默认网关 MAC
-			DNS:        []net.IP{net.ParseIP("8.8.8.8")},
-			SubnetMask: net.IPv4Mask(255, 255, 255, 0),
-			LeaseTime:  3600 * time.Second,
-		}
-		log.Printf("[VXLAN] 使用默认 DHCP 配置")
+		panic(fmt.Sprintf("DHCP Discover failed: %v", err))
 	} else {
 		log.Printf("[VXLAN] DHCP Discover 成功，收到 Offer")
 	}
