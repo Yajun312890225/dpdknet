@@ -602,6 +602,12 @@ func (gvs *GVisorNetstack) CreateUDPConn(port uint16) (net.PacketConn, error) {
 
 // CreateUDPConnWithLocalAddr 创建指定本地地址的 UDP 连接
 func (gvs *GVisorNetstack) CreateUDPConnWithLocalAddr(localIP net.IP, port uint16) (net.PacketConn, error) {
+	// 检查本地IP是否已经在网络栈中配置
+	err := gvs.ensureIPAddressConfigured(localIP)
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure local IP %s: %v", localIP, err)
+	}
+
 	fullAddr := tcpip.FullAddress{
 		NIC:  defaultNICID,
 		Addr: tcpip.AddrFromSlice(localIP.To4()),
@@ -615,6 +621,38 @@ func (gvs *GVisorNetstack) CreateUDPConnWithLocalAddr(localIP net.IP, port uint1
 
 	gvs.stats.UDPConnections++
 	return conn, nil
+}
+
+// ensureIPAddressConfigured 确保指定的IP地址在gVisor网络栈中已配置
+func (gvs *GVisorNetstack) ensureIPAddressConfigured(ip net.IP) error {
+	// 检查IP是否已经配置
+	addrs := gvs.stack.AllAddresses()
+	for nicID, nicAddrs := range addrs {
+		if nicID == defaultNICID {
+			for _, addr := range nicAddrs {
+				if addr.AddressWithPrefix.Address == tcpip.AddrFromSlice(ip.To4()) {
+					// IP已经配置，直接返回
+					return nil
+				}
+			}
+		}
+	}
+
+	// IP未配置，添加为辅助地址
+	protocolAddr := tcpip.ProtocolAddress{
+		Protocol: ipv4.ProtocolNumber,
+		AddressWithPrefix: tcpip.AddressWithPrefix{
+			Address:   tcpip.AddrFromSlice(ip.To4()),
+			PrefixLen: 24, // 使用/24子网掩码
+		},
+	}
+
+	if tcpErr := gvs.stack.AddProtocolAddress(defaultNICID, protocolAddr, stack.AddressProperties{}); tcpErr != nil {
+		return fmt.Errorf("failed to add IP address %s: %v", ip, tcpErr)
+	}
+
+	log.Printf("[INFO] Added virtual IP address %s to gVisor network stack", ip)
+	return nil
 }
 
 // CreateTCPConn 创建 TCP 客户端连接

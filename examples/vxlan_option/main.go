@@ -143,7 +143,7 @@ func tcpClientExample() {
 	fmt.Println("\n3. 创建 VXLAN UDP 连接...")
 
 	// 创建内层本地地址（OSPF 网络地址）
-	innerLocalAddr, err := dpdknet.ResolveUDPAddr("udp", "11.1.1.2:0") // 端口0表示自动分配
+	innerLocalAddr, err := dpdknet.ResolveUDPAddr("udp", "11.1.1.2:0") // 将自动在gVisor中配置此地址
 	if err != nil {
 		log.Fatalf("Failed to resolve inner local address: %v", err)
 	}
