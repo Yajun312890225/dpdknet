@@ -59,7 +59,6 @@ func (config *VXLANConfig) GetMACFromARP(ip net.IP) net.HardwareAddr {
 	config.ARPCache[ipStr] = mac
 	config.ARPMutex.Unlock()
 
-	log.Printf("[ARP] 缓存IP %s 的MAC地址: %s", ipStr, mac)
 	return mac
 }
 
@@ -79,7 +78,6 @@ func (config *VXLANConfig) SetARPEntry(ip net.IP, mac net.HardwareAddr) {
 	config.ARPMutex.Lock()
 	defer config.ARPMutex.Unlock()
 	config.ARPCache[ip.String()] = mac
-	log.Printf("[ARP] 手动设置ARP条目: %s -> %s", ip.String(), mac)
 }
 
 // querySystemARP 查询系统ARP表获取MAC地址
@@ -91,7 +89,6 @@ func querySystemARP(ipStr string) net.HardwareAddr {
 	cmd := exec.Command("arp", "-n", ipStr)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("[ARP] 查询ARP表失败 %s: %v，使用虚拟MAC", ipStr, err)
 		return generateVirtualMAC(ipStr)
 	}
 
@@ -105,7 +102,6 @@ func querySystemARP(ipStr string) net.HardwareAddr {
 				if strings.Contains(field, ":") && len(field) == 17 {
 					mac, err := net.ParseMAC(field)
 					if err == nil {
-						log.Printf("[ARP] 从系统ARP表获取到 %s 的MAC: %s", ipStr, mac)
 						return mac
 					}
 				}
@@ -113,7 +109,6 @@ func querySystemARP(ipStr string) net.HardwareAddr {
 		}
 	}
 
-	log.Printf("[ARP] 系统ARP表中未找到 %s，使用虚拟MAC", ipStr)
 	return generateVirtualMAC(ipStr)
 }
 
@@ -251,15 +246,25 @@ func (vh *VXLANHandler) DecapsulateVXLAN(data []byte) (innerPayload []byte, inne
 	// 返回实际的 VNI，不进行强制匹配检查
 	// 这样可以处理不同 VNI 的包
 	vni = vxlan.VNI
-	log.Printf("[VXLAN] 解封装包: VNI=%d (期望=%d)", vni, vh.config.VNI)
 
-	// 解析内层包
+	// 解析内层包 - 优先尝试以太网帧解析
 	innerPacket := gopacket.NewPacket(vxlan.LayerPayload(), layers.LayerTypeEthernet, gopacket.Default)
 
-	// 获取内层 IP 层
+	// 检查是否为ARP包
+	if arpLayer := innerPacket.Layer(layers.LayerTypeARP); arpLayer != nil {
+		// ARP包直接返回整个以太网帧
+		return vxlan.LayerPayload(), nil, nil, 0, 0, 0, vni, nil
+	}
+
+	// 尝试获取IP层
 	innerIPLayer := innerPacket.Layer(layers.LayerTypeIPv4)
 	if innerIPLayer == nil {
-		return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("inner packet does not contain IP layer")
+		// 如果以太网帧解析失败，尝试直接解析为IP包
+		innerPacket = gopacket.NewPacket(vxlan.LayerPayload(), layers.LayerTypeIPv4, gopacket.Default)
+		innerIPLayer = innerPacket.Layer(layers.LayerTypeIPv4)
+		if innerIPLayer == nil {
+			return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("inner packet does not contain IP layer")
+		}
 	}
 
 	innerIP, ok := innerIPLayer.(*layers.IPv4)
@@ -464,6 +469,15 @@ func handleIncomingVXLANPacket(data []byte) {
 		return
 	}
 
+	// 检查是否为ARP包
+	if innerSrcIP == nil && innerDstIP == nil {
+		// 这是ARP包，直接注入到gVisor
+		if gvisor := GetGVisorNetstack(); gvisor != nil {
+			gvisor.InjectDPDKPacket(innerPayload)
+		}
+		return
+	}
+
 	// 保存 VNI 映射信息，用于回程封装
 	saveVNIMapping(innerSrcIP, innerDstIP, vni)
 
@@ -473,8 +487,6 @@ func handleIncomingVXLANPacket(data []byte) {
 	// 注入到 gVisor netstack 进行协议栈处理
 	if gvisor := GetGVisorNetstack(); gvisor != nil {
 		gvisor.InjectDPDKPacket(innerIPPacket)
-		log.Printf("[DEBUG] VXLAN packet injected to gVisor: src=%s:%d, dst=%s:%d, VNI=%d",
-			innerSrcIP, innerSrcPort, innerDstIP, innerDstPort, vni)
 	}
 }
 

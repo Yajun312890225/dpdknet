@@ -20,10 +20,10 @@ func main() {
 	// udpServerExample()
 
 	// 示例3: UDP 客户端带 VXLAN 封装
-	// udpClientExample()
+	udpClientExample()
 
 	// 示例4: TCP 客户端带 VXLAN 封装
-	tcpClientExample()
+	// tcpClientExample()
 
 	// 示例5: ICMP 客户端带 VXLAN 封装 (TODO: 实现)
 	// icmpClientExample()
