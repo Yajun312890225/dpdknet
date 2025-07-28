@@ -420,9 +420,8 @@ func (gvs *GVisorNetstack) checkNeedVXLANEncapsulation(ipPacket []byte) *VXLANCo
 		dstPort = uint16(ipPacket[ipHeaderLen+2])<<8 | uint16(ipPacket[ipHeaderLen+3])
 
 	case 1: // ICMP
-		// ICMP 没有端口概念，使用特殊端口号 0
-		srcPort = 0
-		dstPort = 0
+		// ICMP 包不进行 VXLAN 封装，直接返回 nil
+		return nil
 
 	default:
 		return nil // 其他协议暂不支持
@@ -434,32 +433,19 @@ func (gvs *GVisorNetstack) checkNeedVXLANEncapsulation(ipPacket []byte) *VXLANCo
 
 	log.Printf("[DEBUG] 检查数据包: %s:%d -> %s:%d (协议: %d)", srcIP, srcPort, dstIP, dstPort, protocol)
 
-	if config := gvs.FindVXLANConfig(srcIP, srcPort); config != nil {
-		log.Printf("[DEBUG] 匹配源地址 VXLAN 配置: %s:%d", srcIP, srcPort)
-		return config
-	}
-
-	// 检查目标端口是否注册了 VXLAN 配置
-	if config := gvs.FindVXLANConfig(dstIP, dstPort); config != nil {
-		log.Printf("[DEBUG] 匹配目标地址 VXLAN 配置: %s:%d", dstIP, dstPort)
-		return config
-	}
-
-	// 如果找不到精确匹配，尝试通过目标网络段匹配 VXLAN 配置
-	// 检查是否有适合此目标网段的 VXLAN 配置
-	gvs.vxlanMutex.RLock()
-	for key, config := range gvs.vxlanConnections {
-		gvs.vxlanMutex.RUnlock()
-		// 检查目标IP是否在10.10.10.0/24网段内（VXLAN内层网络）
-		if dstIP.String() == "10.10.10.2" && dstPort == 12345 {
+	// 只处理目标是 10.10.10.1:12345 的 UDP 包
+	if protocol == 17 && dstIP.String() == "10.10.10.1" && dstPort == 12345 {
+		// 查找任意一个 VXLAN 配置用于封装
+		gvs.vxlanMutex.RLock()
+		for key, config := range gvs.vxlanConnections {
+			gvs.vxlanMutex.RUnlock()
 			log.Printf("[DEBUG] 匹配内层网络 VXLAN 配置: %s (key: %s)", dstIP, key)
 			gvs.vxlanMutex.RLock()
 			defer gvs.vxlanMutex.RUnlock()
 			return config
 		}
-		gvs.vxlanMutex.RLock()
+		gvs.vxlanMutex.RUnlock()
 	}
-	gvs.vxlanMutex.RUnlock()
 
 	return nil
 }
@@ -479,16 +465,13 @@ func (gvs *GVisorNetstack) handleVXLANOutgoingPacket(frame []byte, vxlanConfig *
 	// 提取内层以太网帧（去掉外层以太网头）
 	innerFrame := frame[14:]
 
-	// 创建 VXLAN 处理器
-	handler := NewVXLANHandler(vxlanConfig)
-
-	// 解析内层 IP 包信息
+	// 解析原始内层 IP 包信息
 	if len(innerFrame) < 20 {
 		return fmt.Errorf("inner frame too short for IP header")
 	}
 
-	srcIP := net.IP(innerFrame[12:16])
-	dstIP := net.IP(innerFrame[16:20])
+	originalSrcIP := net.IP(innerFrame[12:16])
+	originalDstIP := net.IP(innerFrame[16:20])
 	protocol := innerFrame[9]
 
 	var srcPort, dstPort uint16
@@ -505,7 +488,30 @@ func (gvs *GVisorNetstack) handleVXLANOutgoingPacket(frame []byte, vxlanConfig *
 		dstPort = 0
 	}
 
-	log.Printf("[DEBUG] 内层包信息: %s:%d -> %s:%d (协议: %d)", srcIP, srcPort, dstIP, dstPort, protocol)
+	log.Printf("[DEBUG] 原始内层包信息: %s:%d -> %s:%d (协议: %d)", originalSrcIP, srcPort, originalDstIP, dstPort, protocol)
+
+	// 构造虚拟内层网络地址映射
+	// 将外层VTEP地址映射到内层虚拟地址
+	var innerSrcIP, innerDstIP net.IP
+
+	// 源地址：外层本地VTEP -> 内层虚拟源地址
+	if originalSrcIP.Equal(vxlanConfig.LocalIP) {
+		innerSrcIP = net.ParseIP("10.10.10.1") // 虚拟内层源地址
+	} else {
+		innerSrcIP = originalSrcIP // 保持原有地址
+	}
+
+	// 目标地址：如果是发往10.10.10.1，改为10.10.10.2
+	if originalDstIP.String() == "10.10.10.1" {
+		innerDstIP = net.ParseIP("10.10.10.2") // 虚拟内层目标地址
+	} else {
+		innerDstIP = originalDstIP // 保持原有地址
+	}
+
+	log.Printf("[DEBUG] 映射后内层包信息: %s:%d -> %s:%d (协议: %d)", innerSrcIP, srcPort, innerDstIP, dstPort, protocol)
+
+	// 创建 VXLAN 处理器
+	handler := NewVXLANHandler(vxlanConfig)
 
 	// 使用 VXLAN 处理器进行封装
 	var vxlanPacket []byte
@@ -513,17 +519,17 @@ func (gvs *GVisorNetstack) handleVXLANOutgoingPacket(frame []byte, vxlanConfig *
 
 	if protocol == 6 { // TCP
 		vxlanPacket, err = handler.EncapsulateVXLAN(
-			innerFrame, srcIP, dstIP, srcPort, dstPort,
+			innerFrame, innerSrcIP, innerDstIP, srcPort, dstPort,
 			layers.IPProtocolTCP,
 		)
 	} else if protocol == 17 { // UDP
 		vxlanPacket, err = handler.EncapsulateVXLAN(
-			innerFrame, srcIP, dstIP, srcPort, dstPort,
+			innerFrame, innerSrcIP, innerDstIP, srcPort, dstPort,
 			layers.IPProtocolUDP,
 		)
 	} else if protocol == 1 { // ICMP
 		vxlanPacket, err = handler.EncapsulateVXLAN(
-			innerFrame, srcIP, dstIP, srcPort, dstPort,
+			innerFrame, innerSrcIP, innerDstIP, srcPort, dstPort,
 			layers.IPProtocolICMPv4,
 		)
 	} else {

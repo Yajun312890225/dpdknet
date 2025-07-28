@@ -112,7 +112,7 @@ func tcpClientExample() {
 	fmt.Println("\n=== TCP Client with VXLAN Example ===")
 
 	// 设置环境变量确保 DPDK 和 gVisor 使用正确的本地 IP
-	localVTEP := "192.168.66.75"
+	localVTEP := "192.168.66.57"
 	os.Setenv("DPDKNET_LOCAL_IP", localVTEP)
 	fmt.Printf("设置 DPDKNET_LOCAL_IP=%s\n", localVTEP)
 
@@ -160,13 +160,13 @@ func tcpClientExample() {
 	fmt.Println("3. 创建 VXLAN UDP 连接...")
 	// 改为发送到一个标准服务端口，如 DNS (53) 或者 DHCP (67)
 	// 或者使用一个自定义的高端口
-	conn, err := dpdknet.Dial("udp", "10.10.10.2:12345", dpdknet.WithVXLAN(vxlanConfig))
+	conn, err := dpdknet.Dial("udp", "10.10.10.1:12345", dpdknet.WithVXLAN(vxlanConfig))
 	if err != nil {
 		log.Fatalf("Failed to dial UDP with VXLAN: %v", err)
 	}
 	defer conn.Close()
 
-	fmt.Println("UDP client connected with VXLAN to 10.10.10.2:12345 (Option 风格)")
+	fmt.Println("UDP client connected with VXLAN to 10.10.10.1:12345 (Option 风格)")
 	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
 		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 
