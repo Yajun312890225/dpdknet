@@ -235,10 +235,31 @@ func DialUDPWithVXLAN(network string, laddr, raddr *UDPAddr, vxlanConfig *VXLANC
 		vxlanLocalAddr.Port = laddr.Port
 	}
 
-	// 2. 创建 UDP 连接
-	conn, err := ListenUDP(network, vxlanLocalAddr)
-	if err != nil {
-		return nil, err
+	// 2. 创建 UDP 连接 - 在 VXLAN 场景下使用内层地址
+	var gvisorConn net.PacketConn
+	var actualLocalAddr *UDPAddr
+
+	if laddr != nil {
+		// 如果指定了内层本地地址，使用它创建 gVisor 连接
+		var err error
+		gvisorConn, err = CreateGVisorUDPConnWithLocalAddr(laddr.IP, uint16(laddr.Port))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gVisor UDP connection with local addr %s:%d: %v", laddr.IP, laddr.Port, err)
+		}
+		actualLocalAddr = laddr
+	} else {
+		// 否则使用外层 VTEP 地址
+		var err error
+		gvisorConn, err = CreateGVisorUDPConn(uint16(vxlanLocalAddr.Port))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gVisor UDP connection: %v", err)
+		}
+		actualLocalAddr = vxlanLocalAddr
+	}
+
+	conn := &UDPConn{
+		localAddr:  actualLocalAddr,
+		gvisorConn: gvisorConn,
 	}
 
 	// 3. 设置内层远程地址（这是 VXLAN 隧道内部的目标）
@@ -250,22 +271,38 @@ func DialUDPWithVXLAN(network string, laddr, raddr *UDPAddr, vxlanConfig *VXLANC
 
 	// 5. 注册 VXLAN 连接到全局网络栈
 	if globalGVisorStack != nil {
-		// 注册方式1：按本地 VTEP 地址和端口注册
+		// 如果用户指定了内层本地地址，使用内层地址注册
+		var innerLocalIP net.IP
+		var innerLocalPort uint16
+
+		if laddr != nil {
+			innerLocalIP = laddr.IP
+			innerLocalPort = uint16(laddr.Port)
+		} else {
+			// 如果没有指定内层地址，使用外层 VTEP 地址
+			innerLocalIP = vxlanConfig.LocalIP
+			innerLocalPort = uint16(vxlanLocalAddr.Port)
+		}
+
+		// 注册内层地址和端口到 VXLAN 配置
 		globalGVisorStack.RegisterVXLANConnection(
-			vxlanConfig.LocalIP,
-			uint16(vxlanLocalAddr.Port),
+			innerLocalIP,
+			innerLocalPort,
 			vxlanConfig,
 		)
 
-		// 注册方式2：按内层目标地址和端口注册（这样可以捕获到发往内层目标的数据包）
+		// 注册内层目标地址和端口（这样可以捕获到发往内层目标的数据包）
 		globalGVisorStack.RegisterVXLANConnection(
 			raddr.IP,
 			uint16(raddr.Port),
 			vxlanConfig,
 		)
 
-		log.Printf("[INFO] VXLAN UDP connection: VNI %d, %s -> %s",
-			vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
+		log.Printf("[INFO] VXLAN UDP connection: VNI %d, Inner %s:%d -> %s:%d, Outer %s -> %s",
+			vxlanConfig.VNI,
+			innerLocalIP, innerLocalPort,
+			raddr.IP, raddr.Port,
+			vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 	}
 
 	return conn, nil

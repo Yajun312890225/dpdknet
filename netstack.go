@@ -600,6 +600,23 @@ func (gvs *GVisorNetstack) CreateUDPConn(port uint16) (net.PacketConn, error) {
 	return conn, nil
 }
 
+// CreateUDPConnWithLocalAddr 创建指定本地地址的 UDP 连接
+func (gvs *GVisorNetstack) CreateUDPConnWithLocalAddr(localIP net.IP, port uint16) (net.PacketConn, error) {
+	fullAddr := tcpip.FullAddress{
+		NIC:  defaultNICID,
+		Addr: tcpip.AddrFromSlice(localIP.To4()),
+		Port: port,
+	}
+
+	conn, err := gonet.DialUDP(gvs.stack, &fullAddr, nil, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create UDP connection with local addr %s:%d: %v", localIP, port, err)
+	}
+
+	gvs.stats.UDPConnections++
+	return conn, nil
+}
+
 // CreateTCPConn 创建 TCP 客户端连接
 func (gvs *GVisorNetstack) CreateTCPConn(localAddr, remoteAddr *net.TCPAddr) (net.Conn, error) {
 	remoteFullAddr := tcpip.FullAddress{
@@ -694,6 +711,15 @@ func CreateGVisorUDPConn(port uint16) (net.PacketConn, error) {
 		return nil, fmt.Errorf("gVisor netstack not initialized")
 	}
 	return gvs.CreateUDPConn(port)
+}
+
+// CreateGVisorUDPConnWithLocalAddr 通过 gVisor netstack 创建指定本地地址的 UDP 连接
+func CreateGVisorUDPConnWithLocalAddr(localIP net.IP, port uint16) (net.PacketConn, error) {
+	gvs := GetGVisorNetstack()
+	if gvs == nil {
+		return nil, fmt.Errorf("gVisor netstack not initialized")
+	}
+	return gvs.CreateUDPConnWithLocalAddr(localIP, port)
 }
 
 // CreateGVisorTCPConn 通过 gVisor netstack 创建 TCP 客户端连接

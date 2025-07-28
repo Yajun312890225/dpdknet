@@ -11,6 +11,7 @@ type Option func(*options)
 
 type options struct {
 	vxlanConfig *VXLANConfig
+	localAddr   net.Addr // 本地地址
 	// 可扩展更多参数
 }
 
@@ -25,6 +26,13 @@ func WithVXLAN(cfg *VXLANConfig) Option {
 	}
 }
 
+// WithLocalAddr 设置本地地址
+func WithLocalAddr(localAddr net.Addr) Option {
+	return func(o *options) {
+		o.localAddr = localAddr
+	}
+}
+
 // Dial connects to the address on the named network, with Option 风格。
 func Dial(network, address string, opts ...Option) (net.Conn, error) {
 	o := setDefaultOption()
@@ -32,6 +40,7 @@ func Dial(network, address string, opts ...Option) (net.Conn, error) {
 		opt(o)
 	}
 	vxlanConfig := o.vxlanConfig
+	localAddr := o.localAddr
 
 	switch network {
 	case "tcp", "tcp4", "tcp6":
@@ -39,19 +48,35 @@ func Dial(network, address string, opts ...Option) (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		if vxlanConfig != nil {
-			return DialTCPWithVXLAN(network, nil, addr, vxlanConfig)
+
+		var laddr *TCPAddr
+		if localAddr != nil {
+			if tcpAddr, ok := localAddr.(*TCPAddr); ok {
+				laddr = tcpAddr
+			}
 		}
-		return DialTCP(network, nil, addr)
+
+		if vxlanConfig != nil {
+			return DialTCPWithVXLAN(network, laddr, addr, vxlanConfig)
+		}
+		return DialTCP(network, laddr, addr)
 	case "udp", "udp4", "udp6":
 		addr, err := ResolveUDPAddr(network, address)
 		if err != nil {
 			return nil, err
 		}
-		if vxlanConfig != nil {
-			return DialUDPWithVXLAN(network, nil, addr, vxlanConfig)
+
+		var laddr *UDPAddr
+		if localAddr != nil {
+			if udpAddr, ok := localAddr.(*UDPAddr); ok {
+				laddr = udpAddr
+			}
 		}
-		return DialUDP(network, nil, addr)
+
+		if vxlanConfig != nil {
+			return DialUDPWithVXLAN(network, laddr, addr, vxlanConfig)
+		}
+		return DialUDP(network, laddr, addr)
 	case "icmp", "icmp4", "icmp6":
 		addr, err := net.ResolveIPAddr(network, address)
 		if err != nil {

@@ -51,7 +51,6 @@ func NewDHCPClient(mac net.HardwareAddr, vxlanConfig *VXLANConfig, hostname stri
 		mac:           mac,
 		vxlanConfig:   vxlanConfig,
 		hostname:      hostname,
-		ifaceName:     "eth1", // 默认网卡名，可根据需要修改
 		pendingOffers: make(chan *DHCPOfferInfo, 10),
 		pendingACKs:   make(chan *DHCPOfferInfo, 10),
 		transactionID: uint32(time.Now().Unix()), // 使用时间戳作为事务 ID

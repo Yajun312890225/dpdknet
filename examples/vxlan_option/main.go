@@ -111,10 +111,10 @@ func udpServerExample() {
 func tcpClientExample() {
 	fmt.Println("\n=== TCP Client with VXLAN Example ===")
 
-	// 设置环境变量确保 DPDK 和 gVisor 使用正确的本地 IP
+	// 设置环境变量确保 DPDK 和 gVisor 使用正确的外层 VTEP IP
 	localVTEP := "192.168.66.57"
 	os.Setenv("DPDKNET_LOCAL_IP", localVTEP)
-	fmt.Printf("设置 DPDKNET_LOCAL_IP=%s\n", localVTEP)
+	fmt.Printf("设置 DPDKNET_LOCAL_IP=%s (外层 VTEP 地址)\n", localVTEP)
 
 	// 确保在创建连接前先初始化网络系统（这会使用新的环境变量）
 	if err := dpdknet.EnsureGlobalNetworkInit(); err != nil {
@@ -141,7 +141,15 @@ func tcpClientExample() {
 
 	// 使用新的 Option 风格创建VXLAN连接
 	fmt.Println("\n3. 创建 VXLAN UDP 连接...")
+
+	// 创建内层本地地址（OSPF 网络地址）
+	innerLocalAddr, err := dpdknet.ResolveUDPAddr("udp", "11.1.1.2:0") // 端口0表示自动分配
+	if err != nil {
+		log.Fatalf("Failed to resolve inner local address: %v", err)
+	}
+
 	conn, err := dpdknet.Dial("udp", "8.137.60.31:12345",
+		dpdknet.WithLocalAddr(innerLocalAddr),
 		dpdknet.WithVXLAN(vxlanConfig))
 	if err != nil {
 		log.Fatalf("Failed to dial UDP with VXLAN: %v", err)
@@ -149,6 +157,8 @@ func tcpClientExample() {
 	defer conn.Close()
 
 	fmt.Println("UDP client connected with VXLAN to 8.137.60.31:12345")
+	fmt.Printf("Inner Local Address: %s, Remote Address: %s\n", innerLocalAddr, "8.137.60.31:12345")
+	fmt.Printf("Outer VTEP: %s -> %s\n", vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
 		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
 
