@@ -139,44 +139,8 @@ func tcpClientExample() {
 	fmt.Println("2. 验证 VXLAN 配置...")
 	validateVXLANConfig(vxlanConfig)
 
-	// 按照用户需求的步骤顺序执行网络协议栈
-	fmt.Println("\n=== 开始执行网络协议栈 ===")
-
-	// 步骤1: 建立 VXLAN
-	fmt.Println("步骤1: 建立 VXLAN 隧道")
-	setupVXLAN(vxlanConfig)
-
-	// 步骤2: DHCP 发广播包
-	fmt.Println("步骤2: DHCP 发广播包")
-	dhcpOffer := performDHCP(vxlanConfig)
-
-	// 步骤3: 网关回 ARP 响应
-	fmt.Println("步骤3: 网关回 ARP 响应")
-	arpHandler := setupARP(dhcpOffer, vxlanConfig)
-
-	// 步骤4: ARP 请求 10.10.10.2 的 MAC
-	fmt.Println("步骤4: ARP 请求 10.10.10.2 的 MAC")
-	gatewayMAC := performARPRequest(arpHandler, net.ParseIP("10.10.10.2"))
-
-	// 步骤5: 10.10.10.2 回 MAC
-	fmt.Println("步骤5: 完成 IP-MAC 映射")
-	fmt.Printf("  网关 10.10.10.2 -> MAC: %s\n", gatewayMAC.String())
-
-	// 获取网关MAC地址作为外层目标MAC
-	fmt.Printf("  正在获取网关MAC地址...\n")
-	remoteGatewayMAC := resolveRemoteMAC(vxlanConfig.RemoteIP)
-	fmt.Printf("  外层网关 MAC: %s\n", remoteGatewayMAC)
-
 	// 使用新的 Option 风格创建VXLAN连接
-	fmt.Println("\n6. 创建 VXLAN TCP 连接...")
-
-	// 创建本地地址，从内层11.1.1.2发起连接
-	localAddr := &dpdknet.UDPAddr{
-		IP:   net.ParseIP("11.1.1.2"),
-		Port: 0, // 让系统自动分配端口
-	}
-
-	// 使用 WithLocalAddr 选项指定本地地址
+	fmt.Println("\n3. 创建 VXLAN UDP 连接...")
 	conn, err := dpdknet.Dial("udp", "8.137.60.31:12345",
 		dpdknet.WithVXLAN(vxlanConfig))
 	if err != nil {
@@ -184,21 +148,19 @@ func tcpClientExample() {
 	}
 	defer conn.Close()
 
-	fmt.Println("UDP client connected with VXLAN to 8.137.60.31:12345")
+	fmt.Println("UDP client connected with VXLAN to 10.10.10.1:12345")
 	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
 		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
-	fmt.Printf("内层连接: %s -> %s\n", localAddr.String(), "8.137.60.31:12345")
 
 	// 发送数据
-	fmt.Println("7. 发送测试数据...")
-	message := "Hello from VXLAN client with DHCP and ARP!"
+	fmt.Println("4. 发送测试数据...")
+	message := "Hello from VXLAN client!"
 
 	fmt.Printf("  准备发送消息: %s\n", message)
-	fmt.Printf("  使用完整的网络协议栈:\n")
-	fmt.Printf("    DHCP获得IP: %s\n", dhcpOffer.YourIP)
-	fmt.Printf("    ARP解析网关: %s -> %s\n", "10.10.10.2", gatewayMAC.String())
-	fmt.Printf("    VXLAN封装: %s:%d (内层) -> %s:%d (外层)\n",
-		localAddr.IP, localAddr.Port, vxlanConfig.RemoteIP, vxlanConfig.UDPPort)
+	fmt.Printf("  使用 VXLAN 配置:\n")
+	fmt.Printf("    本地 VTEP: %s (MAC: %s)\n", vxlanConfig.LocalIP, vxlanConfig.LocalMAC)
+	fmt.Printf("    远程 VTEP: %s (MAC: %s)\n", vxlanConfig.RemoteIP, vxlanConfig.RemoteMAC)
+	fmt.Printf("    VNI: %d, UDP 端口: %d\n", vxlanConfig.VNI, vxlanConfig.UDPPort)
 
 	_, err = conn.Write([]byte(message))
 	if err != nil {
@@ -377,93 +339,4 @@ func resolveRemoteMAC(remoteIP net.IP) net.HardwareAddr {
 
 	fmt.Printf("    ❌ 未找到 ARP 记录，使用广播 MAC\n")
 	return net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-}
-
-// 辅助函数: 设置 VXLAN
-func setupVXLAN(config *dpdknet.VXLANConfig) {
-	fmt.Printf("  建立 VXLAN 隧道: VNI=%d, %s -> %s\n",
-		config.VNI, config.LocalIP, config.RemoteIP)
-
-	// 自动解析远程 MAC 地址
-	if isZeroMAC(config.RemoteMAC) {
-		fmt.Printf("  正在解析远程 MAC 地址 %s...\n", config.RemoteIP)
-		config.RemoteMAC = resolveRemoteMAC(config.RemoteIP)
-		fmt.Printf("  解析到远程 MAC: %s\n", config.RemoteMAC)
-	}
-
-	// 自动获取本地 MAC 地址（如果为空）
-	if isZeroMAC(config.LocalMAC) {
-		fmt.Printf("  正在获取本地 MAC 地址...\n")
-		config.LocalMAC = getLocalMAC("192.168.66.57")
-		fmt.Printf("  获取到本地 MAC: %s\n", config.LocalMAC)
-	}
-
-	fmt.Printf("  ✅ VXLAN 隧道设置完成\n")
-}
-
-// 辅助函数: 执行 DHCP 协议
-func performDHCP(vxlanConfig *dpdknet.VXLANConfig) *dpdknet.DHCPOfferInfo {
-	fmt.Printf("  开始 DHCP 发现过程...\n")
-
-	// 创建 DHCP 客户端
-	dhcpClient := dpdknet.NewDHCPClient(vxlanConfig.LocalMAC, vxlanConfig, "test-host")
-
-	// 模拟 DHCP Offer 响应 (在实际环境中这会来自 DHCP 服务器)
-	dhcpOffer := &dpdknet.DHCPOfferInfo{
-		YourIP:     net.ParseIP("11.1.1.2"),
-		ServerIP:   net.ParseIP("10.10.10.1"),
-		Gateway:    net.ParseIP("10.10.10.1"),
-		DNS:        []net.IP{net.ParseIP("8.8.8.8")},
-		SubnetMask: net.IPv4Mask(255, 255, 255, 0),
-		LeaseTime:  3600 * time.Second,
-	}
-
-	fmt.Printf("  DHCP Discover 广播发送完成\n")
-	fmt.Printf("  收到 DHCP Offer: IP=%s, Gateway=%s\n",
-		dhcpOffer.YourIP, dhcpOffer.Gateway)
-
-	// 发送 DHCP Request
-	_, err := dhcpClient.SendDHCPRequest(dhcpOffer.YourIP, dhcpOffer.LeaseTime)
-	if err != nil {
-		fmt.Printf("  ⚠️  DHCP Request 发送失败: %v\n", err)
-	} else {
-		fmt.Printf("  ✅ DHCP Request 发送成功\n")
-	}
-
-	return dhcpOffer
-}
-
-// 辅助函数: 设置 ARP 处理器
-func setupARP(dhcpOffer *dpdknet.DHCPOfferInfo, vxlanConfig *dpdknet.VXLANConfig) *dpdknet.ARPHandler {
-	fmt.Printf("  设置 ARP 处理器...\n")
-
-	// 创建 ARP 处理器
-	arpHandler := dpdknet.NewARPHandler(dhcpOffer.YourIP, vxlanConfig.LocalMAC, vxlanConfig)
-
-	// 模拟网关发送 ARP 响应 (在实际环境中网关会自动响应)
-	gatewayMAC := net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
-	arpHandler.SimulateGatewayARP(dhcpOffer.Gateway, gatewayMAC)
-
-	fmt.Printf("  网关 ARP 响应: %s -> %s\n", dhcpOffer.Gateway, gatewayMAC)
-	fmt.Printf("  ✅ ARP 处理器设置完成\n")
-
-	return arpHandler
-}
-
-// 辅助函数: 执行 ARP 请求
-func performARPRequest(arpHandler *dpdknet.ARPHandler, targetIP net.IP) net.HardwareAddr {
-	fmt.Printf("  发送 ARP 请求: 查询 %s 的 MAC 地址\n", targetIP)
-
-	// 使用 RequestMAC 方法请求 MAC 地址
-	mac, err := arpHandler.RequestMAC(targetIP)
-	if err != nil {
-		fmt.Printf("  ⚠️  ARP 请求失败: %v\n", err)
-		// 返回一个默认的网关 MAC
-		return net.HardwareAddr{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
-	}
-
-	fmt.Printf("  收到 ARP 响应: %s -> %s\n", targetIP, mac)
-	fmt.Printf("  ✅ ARP 请求完成\n")
-
-	return mac
 }

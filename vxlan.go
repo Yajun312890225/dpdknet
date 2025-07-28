@@ -144,10 +144,10 @@ func (vh *VXLANHandler) DecapsulateVXLAN(data []byte) (innerPayload []byte, inne
 		return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("invalid VXLAN layer")
 	}
 
-	// 检查 VNI 是否匹配
-	if vxlan.VNI != vh.config.VNI {
-		return nil, nil, nil, 0, 0, 0, 0, fmt.Errorf("VNI mismatch: expected %d, got %d", vh.config.VNI, vxlan.VNI)
-	}
+	// 返回实际的 VNI，不进行强制匹配检查
+	// 这样可以处理不同 VNI 的包
+	vni = vxlan.VNI
+	log.Printf("[VXLAN] 解封装包: VNI=%d (期望=%d)", vni, vh.config.VNI)
 
 	// 解析内层包
 	innerPacket := gopacket.NewPacket(vxlan.LayerPayload(), layers.LayerTypeEthernet, gopacket.Default)
@@ -337,8 +337,18 @@ func handleIncomingVXLANPacket(data []byte) {
 		return
 	}
 
-	// 创建临时处理器进行解封装
-	tmpHandler := NewVXLANHandler(DefaultVXLANConfig())
+	// 先解析包获取实际的 VNI
+	actualVNI, err := extractVNIFromPacket(data)
+	if err != nil {
+		log.Printf("[DEBUG] Failed to extract VNI from VXLAN packet: %v", err)
+		return
+	}
+
+	// 创建对应 VNI 的处理器进行解封装
+	config := DefaultVXLANConfig()
+	config.VNI = actualVNI // 使用实际的 VNI
+	tmpHandler := NewVXLANHandler(config)
+
 	innerPayload, innerSrcIP, innerDstIP, innerSrcPort, innerDstPort, protocol, vni, err := tmpHandler.DecapsulateVXLAN(data)
 	if err != nil {
 		log.Printf("[DEBUG] Failed to decapsulate VXLAN packet: %v", err)
@@ -385,6 +395,25 @@ func getVNIForDestination(srcIP, dstIP net.IP) (uint32, bool) {
 }
 
 // -------------------- VXLAN 核心处理方法 --------------------
+
+// extractVNIFromPacket 从 VXLAN 包中提取 VNI
+func extractVNIFromPacket(data []byte) (uint32, error) {
+	packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
+
+	// 获取 VXLAN 层
+	vxlanLayer := packet.Layer(layers.LayerTypeVXLAN)
+	if vxlanLayer == nil {
+		return 0, fmt.Errorf("packet does not contain VXLAN layer")
+	}
+
+	vxlan, ok := vxlanLayer.(*layers.VXLAN)
+	if !ok {
+		return 0, fmt.Errorf("invalid VXLAN layer")
+	}
+
+	return vxlan.VNI, nil
+}
+
 func constructInnerIPPacket(payload []byte, srcIP, dstIP net.IP, srcPort, dstPort uint16, protocol layers.IPProtocol) []byte {
 	// 创建以太网帧
 	ethLayer := &layers.Ethernet{
