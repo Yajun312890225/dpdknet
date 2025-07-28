@@ -210,7 +210,6 @@ func (gvs *GVisorNetstack) RegisterVXLANConnection(localIP net.IP, localPort uin
 
 	key := fmt.Sprintf("%s:%d", localIP.String(), localPort)
 	gvs.vxlanConnections[key] = config
-	log.Printf("[DEBUG] Registered VXLAN connection: %s with VNI %d", key, config.VNI)
 }
 
 // UnregisterVXLANConnection 取消注册 VXLAN 连接配置
@@ -220,7 +219,6 @@ func (gvs *GVisorNetstack) UnregisterVXLANConnection(localIP net.IP, localPort u
 
 	key := fmt.Sprintf("%s:%d", localIP.String(), localPort)
 	delete(gvs.vxlanConnections, key)
-	log.Printf("[DEBUG] Unregistered VXLAN connection: %s", key)
 }
 
 // FindVXLANConfig 查找端口对应的 VXLAN 配置
@@ -433,8 +431,6 @@ func (gvs *GVisorNetstack) checkNeedVXLANEncapsulation(ipPacket []byte) *VXLANCo
 	srcIP := net.IP(ipPacket[12:16])
 	dstIP := net.IP(ipPacket[16:20])
 
-	log.Printf("[DEBUG] 检查数据包: %s:%d -> %s:%d (协议: %d)", srcIP, srcPort, dstIP, dstPort, protocol)
-
 	if config := gvs.FindVXLANConfig(srcIP, srcPort); config != nil {
 		log.Printf("[DEBUG] 匹配源地址 VXLAN 配置: %s:%d", srcIP, srcPort)
 		return config
@@ -454,12 +450,6 @@ func (gvs *GVisorNetstack) handleVXLANOutgoingPacket(frame []byte, vxlanConfig *
 	if len(frame) < 14 {
 		return fmt.Errorf("frame too short for ethernet header")
 	}
-
-	log.Printf("[DEBUG] VXLAN封装开始，原始帧长度: %d", len(frame))
-	log.Printf("[DEBUG] VXLAN配置: VNI=%d, LocalIP=%s, RemoteIP=%s",
-		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
-	log.Printf("[DEBUG] MAC配置: LocalMAC=%s, RemoteMAC=%s",
-		vxlanConfig.LocalMAC, vxlanConfig.RemoteMAC)
 
 	// 提取内层以太网帧（去掉外层以太网头）
 	innerFrame := frame[14:]
@@ -490,8 +480,6 @@ func (gvs *GVisorNetstack) handleVXLANOutgoingPacket(frame []byte, vxlanConfig *
 		dstPort = 0
 	}
 
-	log.Printf("[DEBUG] 内层包信息: %s:%d -> %s:%d (协议: %d)", srcIP, srcPort, dstIP, dstPort, protocol)
-
 	// 使用 VXLAN 处理器进行封装
 	var vxlanPacket []byte
 	var err error
@@ -519,28 +507,11 @@ func (gvs *GVisorNetstack) handleVXLANOutgoingPacket(frame []byte, vxlanConfig *
 		return fmt.Errorf("failed to encapsulate VXLAN: %v", err)
 	}
 
-	log.Printf("[DEBUG] VXLAN封装完成，封装后数据包长度: %d", len(vxlanPacket))
-
-	// 打印前64字节的十六进制内容用于调试
-	hexDump := ""
-	dumpLen := 64
-	if len(vxlanPacket) < dumpLen {
-		dumpLen = len(vxlanPacket)
-	}
-	for i := 0; i < dumpLen; i++ {
-		if i%16 == 0 && i > 0 {
-			hexDump += "\n"
-		}
-		hexDump += fmt.Sprintf("%02x ", vxlanPacket[i])
-	}
-	log.Printf("[DEBUG] VXLAN包前%d字节:\n%s", dumpLen, hexDump)
-
 	// 发送 VXLAN 封装后的数据包
 	if err := SendRawBytes(vxlanPacket); err != nil {
 		return fmt.Errorf("failed to send VXLAN packet: %v", err)
 	}
 
-	log.Printf("[DEBUG] VXLAN数据包已发送到DPDK")
 	return nil
 }
 
