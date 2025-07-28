@@ -91,50 +91,15 @@ func (vh *VXLANHandler) EncapsulateVXLAN(innerPayload []byte, innerSrcIP, innerD
 		EthernetType: layers.EthernetTypeIPv4,
 	}
 
-	// 6. 构建内层 IP 头
-	innerIPLayer := &layers.IPv4{
-		Version:  4,
-		IHL:      5,
-		TTL:      64,
-		Protocol: protocol, // 支持不同协议
-		SrcIP:    innerSrcIP,
-		DstIP:    innerDstIP,
+	// 6. 直接使用原始内层 IP 包数据，而不是重新构建
+	// 序列化外层结构
+	layersToSerialize := []gopacket.SerializableLayer{
+		ethLayer, ipLayer, udpLayer, vxlanLayer, innerEthLayer,
 	}
 
-	// 7. 根据协议类型构建内层传输层
-	var layersToSerialize []gopacket.SerializableLayer
-	layersToSerialize = append(layersToSerialize, ethLayer, ipLayer, udpLayer, vxlanLayer, innerEthLayer, innerIPLayer)
-
-	switch protocol {
-	case layers.IPProtocolUDP:
-		// 构建内层 UDP 头
-		innerUDPLayer := &layers.UDP{
-			SrcPort: layers.UDPPort(innerSrcPort),
-			DstPort: layers.UDPPort(innerDstPort),
-		}
-		innerUDPLayer.SetNetworkLayerForChecksum(innerIPLayer)
-		layersToSerialize = append(layersToSerialize, innerUDPLayer)
-
-	case layers.IPProtocolTCP:
-		// 构建内层 TCP 头
-		innerTCPLayer := &layers.TCP{
-			SrcPort: layers.TCPPort(innerSrcPort),
-			DstPort: layers.TCPPort(innerDstPort),
-			Seq:     1,
-			Ack:     0,
-			PSH:     true,
-			Window:  8192,
-		}
-		innerTCPLayer.SetNetworkLayerForChecksum(innerIPLayer)
-		layersToSerialize = append(layersToSerialize, innerTCPLayer)
-
-	case layers.IPProtocolICMPv4:
-		// 对于 ICMP，不需要端口信息，直接添加载荷
-		// ICMP 头在 innerPayload 中
-	}
-
-	// 添加有效载荷
-	layersToSerialize = append(layersToSerialize, gopacket.Payload(innerPayload))
+	// 创建payload层包含原始内层IP数据
+	payloadLayer := gopacket.Payload(innerPayload)
+	layersToSerialize = append(layersToSerialize, payloadLayer)
 
 	// 序列化所有层
 	err := gopacket.SerializeLayers(buf, opts, layersToSerialize...)

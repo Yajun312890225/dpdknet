@@ -30,6 +30,14 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 		return nil, err
 	}
 
+	// 如果 laddr 为 nil，创建默认地址
+	if laddr == nil {
+		laddr = &UDPAddr{
+			IP:   net.IPv4zero,
+			Port: 0, // 让系统自动分配端口
+		}
+	}
+
 	c := &UDPConn{
 		localAddr: laddr,
 	}
@@ -206,4 +214,59 @@ func (c *UDPConn) SetWriteDeadline(t time.Time) error {
 		}
 	}
 	return nil
+}
+
+// DialUDPWithVXLAN 创建带 VXLAN 封装的 UDP 连接
+func DialUDPWithVXLAN(network string, laddr, raddr *UDPAddr, vxlanConfig *VXLANConfig) (*UDPConn, error) {
+	if vxlanConfig == nil {
+		// 如果没有 VXLAN 配置，回退到普通 UDP
+		return DialUDP(network, laddr, raddr)
+	}
+
+	// VXLAN 场景：raddr 是内层目标地址，实际的外层通信在 VTEP 之间进行
+	// 1. 创建本地 UDP 监听器，绑定到 VXLAN 本地地址
+	vxlanLocalAddr := &UDPAddr{
+		IP:   vxlanConfig.LocalIP, // 使用 VXLAN 本地 VTEP IP
+		Port: 0,                   // 让系统分配端口
+	}
+
+	// 如果用户指定了本地地址，使用用户指定的端口
+	if laddr != nil && laddr.Port != 0 {
+		vxlanLocalAddr.Port = laddr.Port
+	}
+
+	// 2. 创建 UDP 连接
+	conn, err := ListenUDP(network, vxlanLocalAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. 设置内层远程地址（这是 VXLAN 隧道内部的目标）
+	conn.remoteAddr = raddr
+
+	// 4. 配置 VXLAN
+	conn.vxlanConfig = vxlanConfig
+	conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
+
+	// 5. 注册 VXLAN 连接到全局网络栈
+	if globalGVisorStack != nil {
+		// 注册方式1：按本地 VTEP 地址和端口注册
+		globalGVisorStack.RegisterVXLANConnection(
+			vxlanConfig.LocalIP,
+			uint16(vxlanLocalAddr.Port),
+			vxlanConfig,
+		)
+
+		// 注册方式2：按内层目标地址和端口注册（这样可以捕获到发往内层目标的数据包）
+		globalGVisorStack.RegisterVXLANConnection(
+			raddr.IP,
+			uint16(raddr.Port),
+			vxlanConfig,
+		)
+
+		log.Printf("[INFO] VXLAN UDP connection: VNI %d, %s -> %s",
+			vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
+	}
+
+	return conn, nil
 }

@@ -166,7 +166,6 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 	if err := EnsureGlobalNetworkInit(); err != nil {
 		return nil, err
 	}
-
 	if raddr == nil {
 		return nil, fmt.Errorf("remote address cannot be nil")
 	}
@@ -187,19 +186,18 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 		Zone: raddr.Zone,
 	}
 
-	// 通过 gVisor netstack 创建TCP连接
-	gvisorConn, err := CreateGVisorTCPConn(localAddr, remoteAddr)
+	// 创建 TCP 连接 - 注意这里创建的是内层连接，实际传输通过 VXLAN
+	// gVisor 会处理 TCP 协议栈，但数据包会通过 VXLAN 封装后发送
+	gvisorConn, err := CreateGVisorTCPConnWithTimeout(localAddr, remoteAddr, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TCP connection: %v", err)
 	}
-
 	// 创建TCPConn包装器
 	tcpConn := &TCPConn{
 		localAddr:  laddr,
 		remoteAddr: raddr,
 		gvisorConn: gvisorConn,
 	}
-
 	// 如果本地地址为空，尝试从连接中获取
 	if tcpConn.localAddr == nil {
 		if localAddrFromConn := gvisorConn.LocalAddr(); localAddrFromConn != nil {
@@ -212,24 +210,38 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 			}
 		}
 	}
-
+	fmt.Println("5")
 	return tcpConn, nil
 }
 
 // DialTCPWithVXLAN 创建带 VXLAN 封装的 TCP 连接
 func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr, vxlanConfig *VXLANConfig) (*TCPConn, error) {
-	fmt.Println(1111)
+
+	// 如果有 VXLAN 配置，先注册 VXLAN 连接
+	if vxlanConfig != nil && globalGVisorStack != nil {
+		// 注册本地端口的 VXLAN 配置
+		localPort := uint16(0)
+		if laddr != nil {
+			localPort = uint16(laddr.Port)
+		}
+		globalGVisorStack.RegisterVXLANConnection(
+			vxlanConfig.LocalIP,
+			localPort,
+			vxlanConfig,
+		)
+		log.Printf("[INFO] Registered VXLAN connection for outbound TCP: local=%s:%d, VNI=%d",
+			vxlanConfig.LocalIP, localPort, vxlanConfig.VNI)
+	}
+
 	conn, err := DialTCP(network, laddr, raddr)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(2222)
 	if vxlanConfig != nil {
 		conn.vxlanConfig = vxlanConfig
 		conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
 		log.Printf("[INFO] TCP connection enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
 	}
-	fmt.Println(3333)
 	return conn, nil
 }
 

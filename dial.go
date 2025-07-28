@@ -48,6 +48,9 @@ func Dial(network, address string, opts ...Option) (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
+		if vxlanConfig != nil {
+			return DialUDPWithVXLAN(network, nil, addr, vxlanConfig)
+		}
 		return DialUDP(network, nil, addr)
 	case "icmp", "icmp4", "icmp6":
 		addr, err := net.ResolveIPAddr(network, address)

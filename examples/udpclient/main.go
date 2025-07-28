@@ -16,7 +16,7 @@ func main() {
 	log.Printf("[INFO] Starting UDP Client example...")
 
 	// 检查参数
-	serverAddr := "127.0.0.1:9090"
+	serverAddr := "192.168.66.29:8000"
 	if len(os.Args) > 1 {
 		serverAddr = os.Args[1]
 	}
@@ -63,10 +63,10 @@ func main() {
 
 		// 接收响应
 		buffer := make([]byte, 4096)
-		
+
 		// 设置读取超时
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		
+
 		n, responseAddr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			log.Printf("[ERROR] Failed to receive response: %v", err)
@@ -76,10 +76,10 @@ func main() {
 		rtt := time.Since(start)
 		response := string(buffer[:n])
 
-		fmt.Printf("Server (%s): %s (RTT: %v)\n", 
+		fmt.Printf("Server (%s): %s (RTT: %v)\n",
 			responseAddr.String(), response, rtt)
 
-		log.Printf("[INFO] Received response from %s: %s (RTT: %v)", 
+		log.Printf("[INFO] Received response from %s: %s (RTT: %v)",
 			responseAddr.String(), response, rtt)
 
 		// 检查是否退出
@@ -115,7 +115,7 @@ func sendTestPackets(conn *dpdknet.UDPConn, remoteAddr *dpdknet.UDPAddr) {
 
 	for i, msg := range testMessages {
 		fmt.Printf("\nSending test packet %d: %s\n", i+1, msg)
-		
+
 		start := time.Now()
 		_, err := conn.WriteToUDP([]byte(msg), remoteAddr)
 		if err != nil {
@@ -126,7 +126,7 @@ func sendTestPackets(conn *dpdknet.UDPConn, remoteAddr *dpdknet.UDPAddr) {
 		// 接收响应
 		buffer := make([]byte, 4096)
 		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-		
+
 		n, _, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			log.Printf("[ERROR] Failed to receive test response: %v", err)
@@ -135,9 +135,9 @@ func sendTestPackets(conn *dpdknet.UDPConn, remoteAddr *dpdknet.UDPAddr) {
 
 		rtt := time.Since(start)
 		response := string(buffer[:n])
-		
+
 		fmt.Printf("Response: %s (RTT: %v)\n", response, rtt)
-		
+
 		time.Sleep(500 * time.Millisecond) // 间隔发送
 	}
 }

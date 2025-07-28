@@ -187,16 +187,13 @@ func SendRawBytes(data []byte) error {
 	// 直接非阻塞发送，如果失败就立即报错，不重试
 	select {
 	case globalBytesCh <- data:
-
 		return nil
 	default:
 		// 队列满时立即失败，不重试（避免阻塞）
 		log.Printf("[ERROR] Byte send queue full (%d/65536), dropping packet immediately", len(globalBytesCh))
 		return fmt.Errorf("global byte send channel full")
 	}
-}
-
-// SendPacket 通过全局发送通道发送数据包，非阻塞
+} // SendPacket 通过全局发送通道发送数据包，非阻塞
 func SendPacket(pkt *packet.Packet) error {
 	// 只尝试非阻塞发送，避免任何形式的延迟
 	select {
