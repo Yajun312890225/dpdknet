@@ -38,6 +38,7 @@ type DHCPOfferInfo struct {
 	YourIP      net.IP
 	ServerIP    net.IP
 	Gateway     net.IP
+	GatewayMAC  net.HardwareAddr // 网关 MAC 地址
 	SubnetMask  net.IPMask
 	DNS         []net.IP
 	LeaseTime   time.Duration
@@ -176,6 +177,19 @@ func (dc *DHCPClient) parseOffer(packet *dhcpv4.DHCPv4) *DHCPOfferInfo {
 
 	if lease := packet.IPAddressLeaseTime(time.Hour * 24); lease > 0 {
 		info.LeaseTime = lease
+	}
+
+	return info
+}
+
+// parseOfferWithMAC 解析 DHCP Offer/ACK 包，包含来源 MAC 地址
+func (dc *DHCPClient) parseOfferWithMAC(packet *dhcpv4.DHCPv4, srcMAC net.HardwareAddr) *DHCPOfferInfo {
+	info := dc.parseOffer(packet)
+
+	// 如果数据包来自网关服务器，则保存网关 MAC
+	if packet.ServerIPAddr != nil && !packet.ServerIPAddr.IsUnspecified() {
+		info.GatewayMAC = srcMAC
+		log.Printf("[DHCP] 从 DHCP 响应中提取网关 MAC: %s -> %s", info.Gateway, info.GatewayMAC)
 	}
 
 	return info
@@ -386,9 +400,40 @@ func HandleDHCPPacket(data []byte) {
 	// 根据包类型处理
 	switch dhcpPacket.MessageType() {
 	case dhcpv4.MessageTypeOffer:
-		handleDHCPOffer(dhcpPacket)
+		handleDHCPOffer(dhcpPacket, nil) // 暂时不传递 MAC，后续会修改
 	case dhcpv4.MessageTypeAck:
-		handleDHCPAck(dhcpPacket)
+		handleDHCPAck(dhcpPacket, nil)
+	case dhcpv4.MessageTypeNak:
+		log.Printf("[DHCP] 收到 DHCP NAK: %s", dhcpPacket.String())
+	default:
+		log.Printf("[DHCP] 收到未知 DHCP 消息类型: %s", dhcpPacket.MessageType())
+	}
+}
+
+// HandleDHCPPacketWithFrame 处理接收到的 DHCP 包，包含完整以太网帧信息
+func HandleDHCPPacketWithFrame(frameData []byte, dhcpData []byte) {
+	// 提取源 MAC 地址（以太网帧的第6-11字节）
+	var srcMAC net.HardwareAddr
+	if len(frameData) >= 12 {
+		srcMAC = net.HardwareAddr(frameData[6:12])
+	}
+
+	// 解析 DHCP 包
+	dhcpPacket, err := dhcpv4.FromBytes(dhcpData)
+	if err != nil {
+		log.Printf("[DHCP] 解析 DHCP 包失败: %v", err)
+		return
+	}
+
+	log.Printf("[DHCP] 收到 DHCP 包: 类型=%s, 事务ID=%x, 源MAC=%s",
+		dhcpPacket.MessageType(), dhcpPacket.TransactionID, srcMAC)
+
+	// 根据包类型处理
+	switch dhcpPacket.MessageType() {
+	case dhcpv4.MessageTypeOffer:
+		handleDHCPOffer(dhcpPacket, srcMAC)
+	case dhcpv4.MessageTypeAck:
+		handleDHCPAck(dhcpPacket, srcMAC)
 	case dhcpv4.MessageTypeNak:
 		log.Printf("[DHCP] 收到 DHCP NAK: %s", dhcpPacket.String())
 	default:
@@ -397,7 +442,7 @@ func HandleDHCPPacket(data []byte) {
 }
 
 // handleDHCPOffer 处理 DHCP Offer
-func handleDHCPOffer(packet *dhcpv4.DHCPv4) {
+func handleDHCPOffer(packet *dhcpv4.DHCPv4, srcMAC net.HardwareAddr) {
 	log.Printf("[DHCP] 处理 DHCP Offer: IP=%s", packet.YourIPAddr)
 
 	// 根据事务 ID 找到对应的客户端
@@ -407,8 +452,13 @@ func handleDHCPOffer(packet *dhcpv4.DHCPv4) {
 		return
 	}
 
-	// 解析 Offer 信息
-	offerInfo := client.parseOffer(packet)
+	// 解析 Offer 信息，包含网关 MAC
+	var offerInfo *DHCPOfferInfo
+	if srcMAC != nil {
+		offerInfo = client.parseOfferWithMAC(packet, srcMAC)
+	} else {
+		offerInfo = client.parseOffer(packet)
+	}
 
 	// 发送到等待的通道
 	select {
@@ -420,7 +470,7 @@ func handleDHCPOffer(packet *dhcpv4.DHCPv4) {
 }
 
 // handleDHCPAck 处理 DHCP ACK
-func handleDHCPAck(packet *dhcpv4.DHCPv4) {
+func handleDHCPAck(packet *dhcpv4.DHCPv4, srcMAC net.HardwareAddr) {
 	log.Printf("[DHCP] 处理 DHCP ACK: IP=%s", packet.YourIPAddr)
 
 	// 根据事务 ID 找到对应的客户端
@@ -430,8 +480,13 @@ func handleDHCPAck(packet *dhcpv4.DHCPv4) {
 		return
 	}
 
-	// 解析 ACK 信息
-	ackInfo := client.parseOffer(packet)
+	// 解析 ACK 信息，包含网关 MAC
+	var ackInfo *DHCPOfferInfo
+	if srcMAC != nil {
+		ackInfo = client.parseOfferWithMAC(packet, srcMAC)
+	} else {
+		ackInfo = client.parseOffer(packet)
+	}
 
 	// 发送到等待的通道
 	select {
