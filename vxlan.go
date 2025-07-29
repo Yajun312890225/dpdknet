@@ -510,8 +510,6 @@ func (vh *VXLANHandler) GetStats() *VXLANStats {
 // SetConfig 更新 VXLAN 配置
 func (vh *VXLANHandler) SetConfig(config *VXLANConfig) {
 	vh.config = config
-	log.Printf("[INFO] VXLAN config updated: VNI=%d, LocalIP=%s, RemoteIP=%s",
-		config.VNI, config.LocalIP, config.RemoteIP)
 }
 
 // GetConfig 获取当前 VXLAN 配置
@@ -549,7 +547,6 @@ func handleIncomingVXLANPacket(data []byte) {
 	}
 }
 
-// constructInnerIPPacket 构建内层 IP 包
 
 // -------------------- VXLAN 核心处理方法 --------------------
 
