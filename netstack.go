@@ -213,7 +213,6 @@ func (gvs *GVisorNetstack) RegisterVXLANConnection(localIP net.IP, localPort uin
 
 	key := fmt.Sprintf("%s:%d", localIP.String(), localPort)
 	gvs.vxlanConnections[key] = GetGlobalVXLANConfig()
-	log.Printf("[DEBUG] Registered VXLAN connection: %s", key)
 }
 
 // UnregisterVXLANConnection 取消注册 VXLAN 连接配置
@@ -223,7 +222,6 @@ func (gvs *GVisorNetstack) UnregisterVXLANConnection(localIP net.IP, localPort u
 
 	key := fmt.Sprintf("%s:%d", localIP.String(), localPort)
 	delete(gvs.vxlanConnections, key)
-	log.Printf("[DEBUG] Unregistered VXLAN connection: %s", key)
 }
 
 // FindVXLANConfig 查找端口对应的 VXLAN 配置
@@ -254,8 +252,6 @@ func (gvs *GVisorNetstack) dpdkPacketProcessor() {
 // netstackPacketProcessor 处理来自 netstack 的数据包（发送到 DPDK）
 func (gvs *GVisorNetstack) netstackPacketProcessor() {
 	defer gvs.wg.Done()
-
-	log.Printf("[DEBUG] netstackPacketProcessor started")
 
 	for {
 		select {
@@ -599,13 +595,10 @@ func (gvs *GVisorNetstack) CreateUDPConnWithLocalAddr(localIP net.IP, port uint1
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure local IP %s: %v", localIP, err)
 	}
-	// generateInnerSrcMAC(localIP)
-	log.Printf("[INFO] Generated inner source MAC for local IP %s: %s", localIP, generateInnerSrcMAC(localIP))
 	fullAddr := tcpip.FullAddress{
-		NIC:      defaultNICID,
-		Addr:     tcpip.AddrFromSlice(localIP.To4()),
-		Port:     port,
-		LinkAddr: tcpip.LinkAddress(generateInnerSrcMAC(localIP)),
+		NIC:  defaultNICID,
+		Addr: tcpip.AddrFromSlice(localIP.To4()),
+		Port: port,
 	}
 
 	conn, err := gonet.DialUDP(gvs.stack, &fullAddr, nil, ipv4.ProtocolNumber)
@@ -645,7 +638,6 @@ func (gvs *GVisorNetstack) ensureIPAddressConfigured(ip net.IP) error {
 		return fmt.Errorf("failed to add IP address %s: %v", ip, tcpErr)
 	}
 
-	log.Printf("[INFO] Added virtual IP address %s to gVisor network stack", ip)
 	return nil
 }
 

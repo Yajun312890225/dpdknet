@@ -19,7 +19,6 @@ var (
 )
 
 func Init() error {
-	log.Printf("[DEBUG] DPDK Init() called")
 	initOnce.Do(func() {
 		config := flow.Config{
 			// CPUList:               "0-7",  // 8核都利用
@@ -35,12 +34,9 @@ func Init() error {
 			LogType:               common.No,
 			NoSetSIGINTHandler:    true, // 禁用 SIGINT 处理
 		}
-		log.Printf("[DEBUG] Calling flow.SystemInit with config: %+v", config)
 		initErr = flow.SystemInit(&config)
 		if initErr != nil {
 			log.Printf("[ERROR] flow.SystemInit failed: %v", initErr)
-		} else {
-			log.Printf("[DEBUG] flow.SystemInit successful")
 		}
 	})
 	return initErr
@@ -49,22 +45,17 @@ func Init() error {
 // SystemStart starts the DPDK packet processing system
 // This should be called after all flows and handlers are set up
 func SystemStart() error {
-	log.Printf("[DEBUG] SystemStart() called")
 	startOnce.Do(func() {
-		log.Printf("[DEBUG] Starting DPDK packet processing in background...")
 		go func() {
-			log.Printf("[DEBUG] Calling flow.SystemStart in goroutine...")
 			startErr = flow.SystemStart()
 			if startErr != nil {
 				log.Printf("[ERROR] flow.SystemStart failed: %v", startErr)
 			} else {
-				log.Printf("[INFO] DPDK packet processing system started successfully")
 				isStarted = true
 			}
 		}()
 		// 给DPDK一些时间启动
 		time.Sleep(100 * time.Millisecond)
-		log.Printf("[DEBUG] SystemStart setup completed")
 	})
 	return startErr
 }

@@ -91,9 +91,7 @@ func (dc *DHCPClient) initClient() error {
 
 // SendDHCPDiscover 发送 DHCP Discover 并获取 Offer
 func (dc *DHCPClient) SendDHCPDiscover(timeout time.Duration) (*DHCPOfferInfo, error) {
-	log.Printf("[DHCP] 发送 DHCP Discover 广播包 (通过 DPDK 原始包)")
 
-	// 在 DPDK 环境下，不使用系统网络接口，直接创建和发送原始包
 	// 创建 DHCP Discover 包
 	discoverPacket, err := dc.CreateDiscoverPacket()
 	if err != nil {
@@ -108,28 +106,20 @@ func (dc *DHCPClient) SendDHCPDiscover(timeout time.Duration) (*DHCPOfferInfo, e
 	// 通过 VXLAN 发送 DHCP 广播包
 	broadcastIP := net.IPv4(255, 255, 255, 255) // DHCP 广播地址
 	if err := dc.SendRawDHCPPacket(discoverPacket, broadcastIP); err != nil {
-		log.Printf("[DHCP] 发送 DHCP Discover 失败: %v", err)
-		return nil, err
-	} else {
-		log.Printf("[DHCP] DHCP Discover 广播包发送成功，事务ID: %x", dc.transactionID)
+		return nil, fmt.Errorf("发送 DHCP Discover 失败: %v", err)
 	}
 
 	// 等待接收 DHCP Offer
-	log.Printf("[DHCP] 等待 DHCP Offer 响应...")
 	select {
 	case offer := <-dc.pendingOffers:
-		log.Printf("[DHCP] 收到 DHCP Offer: IP=%s, Gateway=%s", offer.YourIP, offer.Gateway)
 		return offer, nil
 	case <-time.After(timeout):
-		log.Printf("[DHCP] 等待 DHCP Offer 超时 (%v)", timeout)
 		return nil, fmt.Errorf("DHCP Discover 超时，未收到 Offer")
 	}
 }
 
 // SendDHCPRequest 发送 DHCP Request 并获取 ACK
 func (dc *DHCPClient) SendDHCPRequest(offer *dhcpv4.DHCPv4, timeout time.Duration) (*DHCPOfferInfo, error) {
-	log.Printf("[DHCP] 发送 DHCP Request")
-
 	if dc.client == nil {
 		return nil, fmt.Errorf("DHCP 客户端未初始化")
 	}
@@ -145,8 +135,6 @@ func (dc *DHCPClient) SendDHCPRequest(offer *dhcpv4.DHCPv4, timeout time.Duratio
 	if err != nil {
 		return nil, fmt.Errorf("DHCP Request 失败: %v", err)
 	}
-
-	log.Printf("[DHCP] 收到 DHCP ACK")
 
 	// 解析 ACK 信息
 	ackInfo := dc.parseOffer(ack.ACK)
@@ -188,7 +176,6 @@ func (dc *DHCPClient) parseOfferWithMAC(packet *dhcpv4.DHCPv4, srcMAC net.Hardwa
 	// 如果数据包来自网关服务器，则保存网关 MAC
 	if packet.ServerIPAddr != nil && !packet.ServerIPAddr.IsUnspecified() {
 		info.GatewayMAC = srcMAC
-		log.Printf("[DHCP] 从 DHCP 响应中提取网关 MAC: %s -> %s", info.Gateway, info.GatewayMAC)
 	}
 
 	return info
@@ -196,21 +183,11 @@ func (dc *DHCPClient) parseOfferWithMAC(packet *dhcpv4.DHCPv4, srcMAC net.Hardwa
 
 // StartDHCP 启动完整的 DHCP 流程
 func (dc *DHCPClient) StartDHCP() (*DHCPOfferInfo, error) {
-	log.Printf("[DHCP] 启动 DHCP 获取 IP 地址流程")
-
 	// 步骤1: 发送 DHCP Discover
 	offer, err := dc.SendDHCPDiscover(10 * time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("DHCP Discover 失败: %v", err)
 	}
-
-	log.Printf("[DHCP] 获得 DHCP Offer: IP=%s, Gateway=%s",
-		offer.YourIP, offer.Gateway)
-
-	// 步骤2: 发送 DHCP Request
-	// 注意：这里需要原始的 DHCP 包，实际使用中需要保存 offer packet
-	// 为了简化，我们直接返回 offer 信息
-	log.Printf("[DHCP] DHCP 流程完成，获得 IP: %s", offer.YourIP)
 	return offer, nil
 }
 
@@ -262,15 +239,11 @@ func (dc *DHCPClient) CreateRequestPacket(offer *dhcpv4.DHCPv4) (*dhcpv4.DHCPv4,
 
 // SendRawDHCPPacket 发送原始 DHCP 包（通过 VXLAN）
 func (dc *DHCPClient) SendRawDHCPPacket(packet *dhcpv4.DHCPv4, dstIP net.IP) error {
-	log.Printf("[DHCP] 发送原始 DHCP 包，长度: %d 字节", len(packet.ToBytes()))
-
 	// 如果有 VXLAN 配置，通过 VXLAN 发送
 	if dc.vxlanConfig != nil {
 		return dc.sendVXLANPacket(packet.ToBytes(), dstIP)
 	}
 
-	// 否则直接发送（这里需要实现底层发送逻辑）
-	log.Printf("[DHCP] 直接发送 DHCP 包到 %s", dstIP.String())
 	return nil
 }
 
@@ -298,8 +271,6 @@ func (dc *DHCPClient) sendVXLANPacket(dhcpData []byte, dstIP net.IP) error {
 		return fmt.Errorf("构建内层 UDP/IP 包失败: %v", err)
 	}
 
-	log.Printf("[DHCP] 构建内层 UDP/IP 包，长度: %d 字节", len(innerPacket))
-
 	// 进行 VXLAN 封装 - 这次传递完整的 UDP/IP 包
 	vxlanPacket, err := handler.EncapsulateVXLAN(
 		innerPacket, srcIP, dstIP,
@@ -307,8 +278,6 @@ func (dc *DHCPClient) sendVXLANPacket(dhcpData []byte, dstIP net.IP) error {
 	if err != nil {
 		return fmt.Errorf("VXLAN 封装失败: %v", err)
 	}
-
-	log.Printf("[DHCP] 通过 VXLAN 发送 DHCP 包，封装后长度: %d 字节", len(vxlanPacket))
 
 	// 发送 VXLAN 包
 	return SendRawBytes(vxlanPacket)
@@ -389,12 +358,8 @@ func HandleDHCPPacket(data []byte) {
 	// 解析 DHCP 包
 	dhcpPacket, err := dhcpv4.FromBytes(data)
 	if err != nil {
-		log.Printf("[DHCP] 解析 DHCP 包失败: %v", err)
 		return
 	}
-
-	log.Printf("[DHCP] 收到 DHCP 包: 类型=%s, 事务ID=%x",
-		dhcpPacket.MessageType(), dhcpPacket.TransactionID)
 
 	// 根据包类型处理
 	switch dhcpPacket.MessageType() {
@@ -402,10 +367,6 @@ func HandleDHCPPacket(data []byte) {
 		handleDHCPOffer(dhcpPacket, nil) // 暂时不传递 MAC，后续会修改
 	case dhcpv4.MessageTypeAck:
 		handleDHCPAck(dhcpPacket, nil)
-	case dhcpv4.MessageTypeNak:
-		log.Printf("[DHCP] 收到 DHCP NAK: %s", dhcpPacket.String())
-	default:
-		log.Printf("[DHCP] 收到未知 DHCP 消息类型: %s", dhcpPacket.MessageType())
 	}
 }
 
@@ -420,12 +381,8 @@ func HandleDHCPPacketWithFrame(frameData []byte, dhcpData []byte) {
 	// 解析 DHCP 包
 	dhcpPacket, err := dhcpv4.FromBytes(dhcpData)
 	if err != nil {
-		log.Printf("[DHCP] 解析 DHCP 包失败: %v", err)
 		return
 	}
-
-	log.Printf("[DHCP] 收到 DHCP 包: 类型=%s, 事务ID=%x, 源MAC=%s",
-		dhcpPacket.MessageType(), dhcpPacket.TransactionID, srcMAC)
 
 	// 根据包类型处理
 	switch dhcpPacket.MessageType() {
@@ -434,20 +391,15 @@ func HandleDHCPPacketWithFrame(frameData []byte, dhcpData []byte) {
 	case dhcpv4.MessageTypeAck:
 		handleDHCPAck(dhcpPacket, srcMAC)
 	case dhcpv4.MessageTypeNak:
-		log.Printf("[DHCP] 收到 DHCP NAK: %s", dhcpPacket.String())
-	default:
-		log.Printf("[DHCP] 收到未知 DHCP 消息类型: %s", dhcpPacket.MessageType())
+		log.Printf("[DHCP] 收到 DHCP NAK")
 	}
 }
 
 // handleDHCPOffer 处理 DHCP Offer
 func handleDHCPOffer(packet *dhcpv4.DHCPv4, srcMAC net.HardwareAddr) {
-	log.Printf("[DHCP] 处理 DHCP Offer: IP=%s", packet.YourIPAddr)
-
 	// 根据事务 ID 找到对应的客户端
 	client := findDHCPClientByTransaction(packet.TransactionID)
 	if client == nil {
-		log.Printf("[DHCP] 未找到匹配的 DHCP 客户端，事务ID: %x", packet.TransactionID)
 		return
 	}
 
@@ -462,20 +414,15 @@ func handleDHCPOffer(packet *dhcpv4.DHCPv4, srcMAC net.HardwareAddr) {
 	// 发送到等待的通道
 	select {
 	case client.pendingOffers <- offerInfo:
-		log.Printf("[DHCP] DHCP Offer 已传递给客户端")
 	default:
-		log.Printf("[DHCP] DHCP Offer 通道已满，丢弃")
 	}
 }
 
 // handleDHCPAck 处理 DHCP ACK
 func handleDHCPAck(packet *dhcpv4.DHCPv4, srcMAC net.HardwareAddr) {
-	log.Printf("[DHCP] 处理 DHCP ACK: IP=%s", packet.YourIPAddr)
-
 	// 根据事务 ID 找到对应的客户端
 	client := findDHCPClientByTransaction(packet.TransactionID)
 	if client == nil {
-		log.Printf("[DHCP] 未找到匹配的 DHCP 客户端，事务ID: %x", packet.TransactionID)
 		return
 	}
 
@@ -490,9 +437,7 @@ func handleDHCPAck(packet *dhcpv4.DHCPv4, srcMAC net.HardwareAddr) {
 	// 发送到等待的通道
 	select {
 	case client.pendingACKs <- ackInfo:
-		log.Printf("[DHCP] DHCP ACK 已传递给客户端")
 	default:
-		log.Printf("[DHCP] DHCP ACK 通道已满，丢弃")
 	}
 }
 

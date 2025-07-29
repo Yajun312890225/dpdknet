@@ -103,10 +103,6 @@ func udpClientExample() {
 		log.Fatalf("全局VXLAN配置未初始化")
 	}
 
-	globalConfig := dpdknet.GetGlobalVXLANConfig()
-	fmt.Printf("使用全局VXLAN配置: VNI=%d, %s -> %s\n",
-		globalConfig.VNI, globalConfig.LocalIP, globalConfig.RemoteIP)
-
 	// 创建内层本地地址（OSPF 网络地址）
 	innerLocalAddr, err := dpdknet.ResolveUDPAddr("udp", "11.1.1.2:0") // 将自动在gVisor中配置此地址
 	if err != nil {
@@ -121,19 +117,10 @@ func udpClientExample() {
 	}
 	defer conn.Close()
 
-	fmt.Printf("Outer VTEP: %s -> %s\n", globalConfig.LocalIP, globalConfig.RemoteIP)
-	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
-		globalConfig.VNI, globalConfig.LocalIP, globalConfig.RemoteIP)
-
 	// 发送数据
 	fmt.Println("发送测试数据...")
 	message := "Hello"
 
-	fmt.Printf("  准备发送消息: %s\n", message)
-	fmt.Printf("  使用全局 VXLAN 配置:\n")
-	fmt.Printf("    本地 VTEP: %s (MAC: %s)\n", globalConfig.LocalIP, globalConfig.LocalMAC)
-	fmt.Printf("    远程 VTEP: %s (MAC: %s)\n", globalConfig.RemoteIP, globalConfig.RemoteMAC)
-	fmt.Printf("    VNI: %d, UDP 端口: %d\n", globalConfig.VNI, globalConfig.UDPPort)
 	go func() {
 		// 增加读的代码
 		for {
@@ -143,11 +130,8 @@ func udpClientExample() {
 				return
 			}
 
-			fmt.Printf("  ✅ 数据写入成功\n")
-
 			// 等待一段时间让数据包发送完成
 			time.Sleep(500 * time.Millisecond)
-			fmt.Println("8. 数据发送完成，完整的网络协议栈测试完成")
 		}
 
 	}()

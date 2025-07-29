@@ -290,12 +290,6 @@ func DialUDPWithVXLAN(network string, laddr, raddr *UDPAddr) (*UDPConn, error) {
 			)
 		}
 
-		log.Printf("[INFO] VXLAN UDP connection: VNI %d, Inner %s:%d -> %s:%d, Outer %s:%d -> %s:%d",
-			vxlanConfig.VNI,
-			actualLocalAddr.IP, actualLocalAddr.Port,
-			raddr.IP, raddr.Port,
-			vxlanConfig.LocalIP, vxlanConfig.UDPPort,
-			vxlanConfig.RemoteIP, vxlanConfig.UDPPort)
 	}
 
 	return conn, nil

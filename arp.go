@@ -57,7 +57,6 @@ func (at *ARPTable) AddEntry(ip net.IP, mac net.HardwareAddr) {
 		MAC:      mac,
 		ExpireAt: time.Now().Add(5 * time.Minute), // 5分钟过期
 	}
-	log.Printf("[ARP] 添加ARP表项: %s -> %s", ipStr, mac.String())
 }
 
 // LookupMAC 查找 MAC 地址
@@ -252,27 +251,6 @@ func (ah *ARPHandler) RequestMAC(targetIP net.IP) (net.HardwareAddr, error) {
 	}
 
 	return nil, fmt.Errorf("ARP请求超时，未收到 %s 的回复", targetIP.String())
-}
-
-// SimulateGatewayARP 模拟网关ARP响应
-// 这是为了符合您的需求："网关回arp响应"
-func (ah *ARPHandler) SimulateGatewayARP(gatewayIP net.IP, gatewayMAC net.HardwareAddr) {
-	log.Printf("[ARP] 模拟网关ARP响应: %s -> %s", gatewayIP.String(), gatewayMAC.String())
-
-	// 添加到ARP表
-	ah.arpTable.AddEntry(gatewayIP, gatewayMAC)
-
-	// 如果有待处理的ARP请求，这里可以触发回调
-	// 实际实现中可能需要更复杂的事件机制
-}
-
-// PrintARPTable 打印ARP表
-func (ah *ARPHandler) PrintARPTable() {
-	log.Printf("[ARP] ARP表内容:")
-	for ip, entry := range ah.arpTable.entries {
-		log.Printf("  %s -> %s (过期时间: %s)",
-			ip, entry.MAC.String(), entry.ExpireAt.Format("15:04:05"))
-	}
 }
 
 // GetARPTable 获取ARP表

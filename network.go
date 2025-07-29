@@ -60,11 +60,9 @@ func getRemoteVTEPFromEnv() net.IP {
 // EnsureGlobalNetworkInit 确保全局网络系统只初始化一次
 func EnsureGlobalNetworkInit() error {
 	globalNetworkOnce.Do(func() {
-		log.Printf("[DEBUG] Initializing global network system...")
 		globalNetworkErr = initializeGlobalNetwork()
 		if globalNetworkErr == nil {
 			globalNetworkInit = true
-			log.Printf("[DEBUG] Global network system initialized successfully")
 		}
 	})
 	return globalNetworkErr
@@ -74,60 +72,45 @@ func EnsureGlobalNetworkInit() error {
 func initializeGlobalNetwork() error {
 	// 初始化DPDK
 	if err := Init(); err != nil {
-		log.Printf("[ERROR] DPDK Init failed: %v", err)
 		return err
 	}
-	log.Printf("[DEBUG] DPDK Init successful")
 
 	// DPDK使用物理端口ID，通常从0开始
 	dpdkPort := uint16(0)
-	log.Printf("[DEBUG] Using DPDK port %d", dpdkPort)
 
 	// 流1：接收流 - SetReceiver -> SetHandler -> SetSender
-	log.Printf("[DEBUG] Setting up RX flow...")
 	rxFlow, err := flow.SetReceiver(dpdkPort)
 	if err != nil {
 		log.Printf("[ERROR] Failed to set receiver on DPDK port %d: %v", dpdkPort, err)
 		return err
 	}
-	log.Printf("[DEBUG] Successfully set receiver on DPDK port %d", dpdkPort)
 
 	// 设置接收处理器
 	flow.SetHandler(rxFlow, globalPacketHandler, nil)
-	log.Printf("[DEBUG] RX packet handler set")
 
 	localMAC = flow.GetPortMACAddress(dpdkPort)
-	log.Printf("[DEBUG] Local MAC address: %s", net.HardwareAddr(localMAC[:]).String())
 	// 关闭接收流
 	if err := flow.SetSender(rxFlow, dpdkPort); err != nil {
 		log.Printf("[ERROR] Failed to set RX sender: %v", err)
 		return err
 	}
-	log.Printf("[DEBUG] RX flow closed with sender")
 
 	// 流2：发送流 - SetGenerator -> SetSender
-	log.Printf("[DEBUG] Setting up TX flow...")
 	globalTxFlow = flow.SetGenerator(globalSendGenerator, nil)
 	if err := flow.SetSender(globalTxFlow, dpdkPort); err != nil {
 		log.Printf("[ERROR] Failed to set TX sender: %v", err)
 		return err
 	}
-	log.Printf("[DEBUG] TX flow created successfully")
 
 	// 启动DPDK数据包处理系统
 	if !IsStarted() {
-		log.Printf("[DEBUG] Starting DPDK packet processing system...")
 		if err := SystemStart(); err != nil {
 			log.Printf("[ERROR] Failed to start DPDK system: %v", err)
 			return err
 		}
-		log.Printf("[DEBUG] DPDK system started successfully")
-	} else {
-		log.Printf("[DEBUG] DPDK system already started")
 	}
 
 	// 初始化和启动 gVisor netstack
-	log.Printf("[DEBUG] Initializing gVisor netstack...")
 
 	// 尝试从环境变量获取IP地址，如果没有设置则使用默认值
 	localIP := getLocalIPFromEnv()
@@ -135,21 +118,18 @@ func initializeGlobalNetwork() error {
 		log.Printf("[ERROR] Failed to integrate gVisor with DPDK: %v", err)
 		return err
 	}
-	log.Printf("[DEBUG] gVisor netstack integrated successfully")
 
 	// 执行 VXLAN 网络协议栈初始化流程
 	if err := initializeVXLANNetworkStack(); err != nil {
 		log.Printf("[ERROR] Failed to initialize VXLAN network stack: %v", err)
 		return err
 	}
-	log.Printf("[DEBUG] VXLAN network stack initialized successfully")
 
 	return nil
 }
 
 // initializeVXLANNetworkStack 初始化 VXLAN 网络协议栈
 func initializeVXLANNetworkStack() error {
-	log.Printf("[VXLAN] 开始初始化 VXLAN 网络协议栈...")
 
 	// 步骤1: 建立 VXLAN 隧道
 	vxlanConfig := &VXLANConfig{
@@ -160,25 +140,15 @@ func initializeVXLANNetworkStack() error {
 		LocalMAC:  net.HardwareAddr(localMAC[:]),                        // 内层本地MAC
 		RemoteMAC: net.HardwareAddr{0xd8, 0x85, 0xc0, 0xa8, 0x42, 0x1d}, // 内层远程MAC (示例)
 	}
-	log.Printf("[VXLAN] 步骤1: 建立 VXLAN 隧道 VNI=%d, %s -> %s",
-		vxlanConfig.VNI, vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
-
-	// 步骤2: DHCP 发广播包获取IP地址 (dst mac: ff:ff:ff:ff:ff:ff)
-	log.Printf("[VXLAN] 步骤2: DHCP 发广播包...")
 
 	var dhcpOffer *DHCPOfferInfo
 
 	dhcpClient := NewDHCPClient(vxlanConfig.LocalMAC, vxlanConfig, "vxlan-host")
 
-	// 尝试简化的 DHCP 流程，设置短超时
-	log.Printf("[VXLAN] 尝试 DHCP Discover (5秒超时)...")
 	var err error
 	dhcpOffer, err = dhcpClient.SendDHCPDiscover(5 * time.Second) // 5秒超时
 	if err != nil {
-		log.Printf("[VXLAN] DHCP Discover 失败，使用默认配置: %v", err)
 		panic(fmt.Sprintf("DHCP Discover failed: %v", err))
-	} else {
-		log.Printf("[VXLAN] DHCP Discover 成功，收到 Offer")
 	}
 
 	// 从 DHCP 获取的 IP 地址和网关
@@ -186,17 +156,12 @@ func initializeVXLANNetworkStack() error {
 	gatewayIP := dhcpOffer.Gateway     // DHCP 提供的网关 IP
 	gatewayMAC := dhcpOffer.GatewayMAC // DHCP 提供的网关 MAC
 
-	log.Printf("[VXLAN] DHCP 完成: 分配IP=%s, 网关=%s, 网关MAC=%s",
-		vxlanIP, gatewayIP, gatewayMAC)
-
 	// 设置网关信息到VXLAN配置中
 	vxlanConfig.SetGateway(gatewayIP, gatewayMAC)
-	log.Printf("[VXLAN] 已将网关信息设置到VXLAN配置中")
 
 	// 保存为全局VXLAN配置
 	globalVXLANConfig = vxlanConfig
 	globalVXLANHandler = NewVXLANHandler(vxlanConfig)
-	log.Printf("[VXLAN] 全局VXLAN配置和处理器已设置")
 
 	// 确保全局网络栈监听VXLAN端口4789来接收外层VXLAN包
 	if globalGVisorStack != nil {
@@ -204,29 +169,10 @@ func initializeVXLANNetworkStack() error {
 			vxlanConfig.LocalIP,
 			vxlanConfig.UDPPort, // 4789端口
 		)
-		log.Printf("[VXLAN] 已注册VXLAN端口监听: %s:%d", vxlanConfig.LocalIP, vxlanConfig.UDPPort)
 	}
-
 	// 创建 ARP 处理器
 	arpHandler := NewARPHandler(vxlanIP, vxlanConfig.LocalMAC, vxlanConfig)
-
-	// 步骤3: DHCP 提供了网关 MAC，直接添加到 ARP 表
-	log.Printf("[VXLAN] 步骤3: 使用 DHCP 提供的网关 MAC...")
-	arpHandler.SimulateGatewayARP(gatewayIP, gatewayMAC)
-	log.Printf("[VXLAN] 网关 ARP 映射(来自DHCP): %s -> %s", gatewayIP, gatewayMAC)
-
-	// 步骤4: 可选的 ARP 表测试（添加其他主机映射）
-	log.Printf("[VXLAN] 步骤4: 完成其他主机 IP-MAC 映射...")
-
-	// 打印最终的 ARP 表
-	log.Printf("[VXLAN] 最终 ARP 表:")
-	arpHandler.PrintARPTable()
-
-	log.Printf("[VXLAN] VXLAN 网络协议栈初始化完成!")
-	log.Printf("[VXLAN] - 内层网络: %s (MAC: %s)", vxlanIP, vxlanConfig.LocalMAC)
-	log.Printf("[VXLAN] - 网关: %s (MAC: %s)", gatewayIP, gatewayMAC)
-	log.Printf("[VXLAN] - VXLAN 隧道: %s -> %s (VNI: %d)",
-		vxlanConfig.LocalIP, vxlanConfig.RemoteIP, vxlanConfig.VNI)
+	arpHandler.arpTable.AddEntry(gatewayIP, gatewayMAC)
 
 	return nil
 }
@@ -260,26 +206,13 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 		return
 	}
 
-	// 提取源IP和目标IP进行初步分析
-	if len(data) >= 30 { // 以太网头(14) + IP头最小(20)
-		srcIP := net.IP(data[26:30])
-		dstIP := net.IP(data[30:34])
-
-		// 记录来自远程VTEP的包
-		if srcIP.String() == "192.168.66.29" {
-			log.Printf("[RX] Packet from remote VTEP: %s -> %s, Length: %d", srcIP, dstIP, len(data))
-		}
-	}
-
 	// 检查是否为 VXLAN 包
 	if IsVXLANPacket(data) {
-		log.Printf("[VXLAN-RX] Detected VXLAN packet, Length: %d", len(data))
 		// 先提取 VXLAN 内层数据
 		innerData := extractVXLANPayload(data)
 		if innerData != nil {
 			// 检查内层是否为 DHCP 包
 			if isDHCPPacket(innerData) {
-				log.Printf("[DHCP] 检测到 VXLAN 内层 DHCP 包")
 				dhcpData := extractDHCPData(innerData)
 				if dhcpData != nil {
 					// 使用带帧信息的 DHCP 处理函数
@@ -295,7 +228,6 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 
 	// 检查是否为直接的 DHCP 包 (UDP 端口 67/68)
 	if isDHCPPacket(data) {
-		log.Printf("[DHCP] 检测到直接 DHCP 包")
 		// 提取 UDP payload 作为 DHCP 数据
 		dhcpData := extractDHCPData(data)
 		if dhcpData != nil {
