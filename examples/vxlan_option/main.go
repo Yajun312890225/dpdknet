@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -20,10 +19,12 @@ func main() {
 	// udpServerExample()
 
 	// 示例3: UDP 客户端带 VXLAN 封装
-	udpClientExample()
+	// go udpClientExample("11.1.1.2:666")
+	// go udpClientExample("11.1.1.3:555")
+	// select {}
 
 	// 示例4: TCP 客户端带 VXLAN 封装
-	// tcpClientExample()
+	tcpClientExample()
 
 	// 示例5: ICMP 客户端带 VXLAN 封装 (TODO: 实现)
 	// icmpClientExample()
@@ -85,13 +86,8 @@ func udpServerExample() {
 	time.Sleep(1 * time.Second)
 }
 
-func udpClientExample() {
+func udpClientExample(ip string) {
 	fmt.Println("\n=== UDP Client with Global VXLAN Example ===")
-
-	// 设置环境变量确保 DPDK 和 gVisor 使用正确的外层 VTEP IP
-	localVTEP := "192.168.66.57"
-	os.Setenv("DPDKNET_LOCAL_IP", localVTEP)
-	fmt.Printf("设置 DPDKNET_LOCAL_IP=%s (外层 VTEP 地址)\n", localVTEP)
 
 	// 确保在创建连接前先初始化网络系统（这会使用新的环境变量并配置VXLAN）
 	if err := dpdknet.EnsureGlobalNetworkInit(); err != nil {
@@ -104,7 +100,7 @@ func udpClientExample() {
 	}
 
 	// 创建内层本地地址（OSPF 网络地址）
-	innerLocalAddr, err := dpdknet.ResolveUDPAddr("udp", "11.1.1.2:0") // 将自动在gVisor中配置此地址
+	innerLocalAddr, err := dpdknet.ResolveUDPAddr("udp", ip) // 将自动在gVisor中配置此地址
 	if err != nil {
 		log.Fatalf("Failed to resolve inner local address: %v", err)
 	}
@@ -119,7 +115,7 @@ func udpClientExample() {
 
 	// 发送数据
 	fmt.Println("发送测试数据...")
-	message := "Hello"
+	message := ip
 
 	go func() {
 		// 增加读的代码
@@ -143,7 +139,8 @@ func udpClientExample() {
 			log.Printf("Read error: %v", err)
 			return
 		}
-		fmt.Printf("Received UDP data: %s\n", string(buffer[:n]))
+		fmt.Printf("Message %s Received UDP data: %s\n", ip, string(buffer[:n]))
+
 	}
 }
 
@@ -317,11 +314,6 @@ func getRemoteMACFromARP(remoteIP string) net.HardwareAddr {
 
 func tcpClientExample() {
 	fmt.Println("\n=== TCP Client with Global VXLAN Example ===")
-
-	// 设置环境变量确保 DPDK 和 gVisor 使用正确的外层 VTEP IP
-	localVTEP := "192.168.66.57"
-	os.Setenv("DPDKNET_LOCAL_IP", localVTEP)
-	fmt.Printf("设置 DPDKNET_LOCAL_IP=%s (外层 VTEP 地址)\n", localVTEP)
 
 	// 确保在创建连接前先初始化网络系统（这会使用新的环境变量并配置VXLAN）
 	if err := dpdknet.EnsureGlobalNetworkInit(); err != nil {
