@@ -399,182 +399,64 @@ func tcpClientExample() {
 	fmt.Println("\n=== TCP Client with Global VXLAN Example ===")
 
 	// 确保在创建连接前先初始化网络系统（这会使用新的环境变量并配置VXLAN）
-	fmt.Println("[DEBUG] 开始初始化网络系统...")
 	if err := dpdknet.EnsureGlobalNetworkInit(); err != nil {
 		log.Fatalf("网络初始化失败: %v", err)
 	}
-	fmt.Println("[DEBUG] ✅ 网络系统初始化成功")
-
-	// 检查全局VXLAN配置是否可用
-	fmt.Println("[DEBUG] 检查全局VXLAN配置...")
-	if !dpdknet.IsVXLANEnabled() {
-		log.Fatalf("全局VXLAN配置未初始化")
-	}
-	fmt.Println("[DEBUG] ✅ 全局VXLAN配置可用")
-
-	globalConfig := dpdknet.GetGlobalVXLANConfig()
-	fmt.Printf("[DEBUG] 使用全局VXLAN配置:\n")
-	fmt.Printf("  VNI: %d\n", globalConfig.VNI)
-	fmt.Printf("  本地VTEP: %s (MAC: %s)\n", globalConfig.LocalIP, globalConfig.LocalMAC)
-	fmt.Printf("  远程VTEP: %s (MAC: %s)\n", globalConfig.RemoteIP, globalConfig.RemoteMAC)
-	fmt.Printf("  VXLAN端口: %d\n", globalConfig.UDPPort)
-
-	// 验证VXLAN配置
-	fmt.Println("[DEBUG] 验证VXLAN配置...")
-	validateVXLANConfig(globalConfig)
-
-	// 测试网络连通性
-	fmt.Println("[DEBUG] 测试网络连通性...")
-	testNetworkConnectivity()
 
 	// 创建内层本地地址（OSPF 网络地址）
-	fmt.Println("[DEBUG] 创建内层本地地址...")
 	innerLocalAddr, err := dpdknet.ResolveTCPAddr("tcp", "11.1.1.2:0") // 将自动在gVisor中配置此地址
 	if err != nil {
 		log.Fatalf("Failed to resolve inner local address: %v", err)
 	}
-	fmt.Printf("[DEBUG] ✅ 内层本地地址: %s\n", innerLocalAddr)
 
 	// 准备连接参数
 	targetAddr := "124.221.130.129:8080"
-	fmt.Printf("[DEBUG] 准备连接到目标地址: %s\n", targetAddr)
-	fmt.Printf("[DEBUG] 使用内层本地地址: %s\n", innerLocalAddr)
-	fmt.Printf("[DEBUG] 启用VXLAN封装\n")
 
 	// 建立TCP连接
-	fmt.Println("[DEBUG] 开始建立TCP连接...")
-	startTime := time.Now()
 	conn, err := dpdknet.Dial("tcp", targetAddr,
 		dpdknet.WithLocalAddr(innerLocalAddr),
 		dpdknet.WithVXLAN())
 	if err != nil {
-		fmt.Printf("[ERROR] TCP连接失败: %v\n", err)
-		fmt.Printf("[ERROR] 连接用时: %v\n", time.Since(startTime))
-
-		// 详细的错误分析
-		fmt.Println("[DEBUG] 开始错误分析...")
-		analyzeConnectionError(err, targetAddr, globalConfig)
 		log.Fatalf("Failed to dial TCP with VXLAN: %v", err)
 	}
 
 	// 添加详细的连接关闭日志
 	defer func() {
-		log.Printf("[CLIENT] 🔚 Starting connection closure process...")
-		log.Printf("[CLIENT] 🔍 Connection details before close: %s -> %s", conn.LocalAddr(), conn.RemoteAddr())
-		log.Printf("[CLIENT] 📡 About to send FIN packet...")
-
-		closeStartTime := time.Now()
-		err := conn.Close()
-		closeDuration := time.Since(closeStartTime)
-
-		if err != nil {
-			log.Printf("[CLIENT] ❌ Error closing connection after %v: %v", closeDuration, err)
-		} else {
-			log.Printf("[CLIENT] ✅ Connection close operation completed successfully in %v", closeDuration)
-			log.Printf("[CLIENT] 🚨 FIN packet should have been sent to server")
-		}
-
+		_ = conn.Close()
 		// 等待一下，让网络包处理完成
-		log.Printf("[CLIENT] 🕐 Waiting briefly for network packet processing...")
 		time.Sleep(time.Millisecond * 100)
 		log.Printf("[CLIENT] 🔚 Connection closure process finished")
 	}()
 
-	connectTime := time.Since(startTime)
-	fmt.Printf("[DEBUG] ✅ TCP连接建立成功! 用时: %v\n", connectTime)
-	fmt.Printf("[DEBUG] 本地地址: %s\n", conn.LocalAddr())
-	fmt.Printf("[DEBUG] 远程地址: %s\n", conn.RemoteAddr())
-
-	fmt.Printf("Outer VTEP: %s -> %s\n", globalConfig.LocalIP, globalConfig.RemoteIP)
-	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
-		globalConfig.VNI, globalConfig.LocalIP, globalConfig.RemoteIP)
-
 	// 发送数据
 	fmt.Println("\n[DEBUG] 开始发送测试数据...")
 	message := "Hello from TCP Client with VXLAN Debug"
-
-	fmt.Printf("[DEBUG] 准备发送消息: %s\n", message)
-	fmt.Printf("[DEBUG] 消息长度: %d 字节\n", len(message))
-	fmt.Printf("[DEBUG] 使用全局 VXLAN 配置:\n")
-	fmt.Printf("  本地 VTEP: %s (MAC: %s)\n", globalConfig.LocalIP, globalConfig.LocalMAC)
-	fmt.Printf("  远程 VTEP: %s (MAC: %s)\n", globalConfig.RemoteIP, globalConfig.RemoteMAC)
-	fmt.Printf("  VNI: %d, UDP 端口: %d\n", globalConfig.VNI, globalConfig.UDPPort)
-
-	writeStart := time.Now()
-	n, err := conn.Write([]byte(message))
-	writeTime := time.Since(writeStart)
+	go func() {
+		for {
+			_, err = conn.Write([]byte(message))
+			if err != nil {
+				log.Printf("Write error: %v", err)
+				return
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+	}()
 
 	if err != nil {
-		fmt.Printf("[ERROR] TCP写入失败: %v\n", err)
-		fmt.Printf("[ERROR] 写入用时: %v\n", writeTime)
-		log.Printf("Write error: %v", err)
 		return
 	}
 
-	fmt.Printf("[DEBUG] ✅ TCP 数据写入成功! 写入 %d 字节, 用时: %v\n", n, writeTime)
-
 	// 尝试读取响应
-	fmt.Println("[DEBUG] 等待服务器响应...")
 	buffer := make([]byte, 1024)
 
-	// 使用goroutine和channel实现超时读取
-	resultCh := make(chan struct {
-		n   int
-		err error
-	}, 1)
-
-	readStart := time.Now()
-	go func() {
-		fmt.Println("[DEBUG] 开始读取协程...")
-		log.Printf("[CLIENT] 📥 Starting read operation from %s...", conn.RemoteAddr())
-
+	for {
 		n, err := conn.Read(buffer)
-		readTime := time.Since(readStart)
-
-		log.Printf("[CLIENT] 📊 Read operation completed: %d bytes, time: %v, error: %v", n, readTime, err)
-		fmt.Printf("[DEBUG] 读取完成: %d 字节, 用时: %v, 错误: %v\n", n, readTime, err)
-
-		if err == nil && n > 0 {
-			log.Printf("[CLIENT] 📨 Received data from %s: %s", conn.RemoteAddr(), string(buffer[:n]))
+		if err != nil {
+			return
 		}
-
-		resultCh <- struct {
-			n   int
-			err error
-		}{n, err}
-	}()
-
-	select {
-	case result := <-resultCh:
-		if result.err != nil {
-			fmt.Printf("[ERROR] 读取错误: %v\n", result.err)
-			log.Printf("Read error: %v", result.err)
-		} else {
-			fmt.Printf("[DEBUG] ✅ 收到服务器响应 (%d 字节): %s\n", result.n, string(buffer[:result.n]))
-		}
-	case <-time.After(3 * time.Second): // 减少超时时间到3秒
-		fmt.Printf("[WARNING] 读取超时(3秒)，可能服务器未响应\n")
-
-		// 超时时进行额外的调试
-		fmt.Println("[DEBUG] 超时调试信息:")
-		fmt.Printf("  连接状态: 可能仍然有效\n")
-		fmt.Printf("  建议检查服务器是否正在监听 %s\n", targetAddr)
-		fmt.Printf("  建议检查VXLAN隧道是否正常工作\n")
+		log.Printf("[CLIENT] 📨 Received data from %s: %s", conn.RemoteAddr(), string(buffer[:n]))
 	}
 
-	// 等待一段时间让数据包发送完成
-	fmt.Println("[DEBUG] 等待数据包发送完成...")
-	time.Sleep(300 * time.Millisecond) // 减少等待时间
-
-	fmt.Println("[DEBUG] TCP 客户端测试完成，完整的网络协议栈测试完成")
-
-	// 最终统计
-	totalTime := time.Since(startTime)
-	fmt.Printf("[SUMMARY] 总用时: %v (连接: %v, 写入: %v)\n", totalTime, connectTime, writeTime)
-
-	// 强制等待一下，确保 defer 中的 close 有时间执行
-	fmt.Println("[DEBUG] 等待连接关闭完成...")
-	time.Sleep(100 * time.Millisecond)
 }
 
 // 分析连接错误的详细信息
