@@ -19,7 +19,7 @@ func main() {
 	// udpServerExample()
 
 	// 示例3: UDP 客户端带 VXLAN 封装
-	// go udpClientExample("11.1.1.2:666")
+	// go udpClientExample("0.0.0.0:8080")
 	// go udpClientExample("11.1.1.3:555")
 	// select {}
 
