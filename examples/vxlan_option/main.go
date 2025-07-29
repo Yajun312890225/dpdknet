@@ -136,18 +136,20 @@ func udpClientExample() {
 	fmt.Printf("    VNI: %d, UDP 端口: %d\n", globalConfig.VNI, globalConfig.UDPPort)
 	go func() {
 		// 增加读的代码
+		for {
+			_, err = conn.Write([]byte(message))
+			if err != nil {
+				log.Printf("Write error: %v", err)
+				return
+			}
 
-		_, err = conn.Write([]byte(message))
-		if err != nil {
-			log.Printf("Write error: %v", err)
-			return
+			fmt.Printf("  ✅ 数据写入成功\n")
+
+			// 等待一段时间让数据包发送完成
+			time.Sleep(500 * time.Millisecond)
+			fmt.Println("8. 数据发送完成，完整的网络协议栈测试完成")
 		}
 
-		fmt.Printf("  ✅ 数据写入成功\n")
-
-		// 等待一段时间让数据包发送完成
-		time.Sleep(500 * time.Millisecond)
-		fmt.Println("8. 数据发送完成，完整的网络协议栈测试完成")
 	}()
 
 	buffer := make([]byte, 1024)

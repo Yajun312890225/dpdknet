@@ -230,20 +230,7 @@ func (gvs *GVisorNetstack) UnregisterVXLANConnection(localIP net.IP, localPort u
 func (gvs *GVisorNetstack) FindVXLANConfig(localIP net.IP, localPort uint16) *VXLANConfig {
 	gvs.vxlanMutex.RLock()
 	defer gvs.vxlanMutex.RUnlock()
-
-	key := fmt.Sprintf("%s:%d", localIP.String(), localPort)
-	config := gvs.vxlanConnections[key]
-
-	log.Printf("[DEBUG] FindVXLANConfig for %s: found=%v", key, config != nil)
-	if config == nil {
-		// 打印当前所有注册的连接以便调试
-		log.Printf("[DEBUG] Current registered VXLAN connections:")
-		for k, v := range gvs.vxlanConnections {
-			log.Printf("[DEBUG]   %s -> %v", k, v != nil)
-		}
-	}
-
-	return config
+	return gvs.vxlanConnections[fmt.Sprintf("%s:%d", localIP.String(), localPort)]
 }
 
 // dpdkPacketProcessor 处理来自 DPDK 的数据包
@@ -273,7 +260,6 @@ func (gvs *GVisorNetstack) netstackPacketProcessor() {
 	for {
 		select {
 		case <-gvs.stopCh:
-			log.Printf("[DEBUG] netstackPacketProcessor stopping")
 			return
 		default:
 			// 读取来自 netstack 的数据包
@@ -284,7 +270,6 @@ func (gvs *GVisorNetstack) netstackPacketProcessor() {
 				continue
 			}
 
-			log.Printf("[DEBUG] netstack packet read, sending to DPDK")
 			// 构建完整的以太网帧并发送到 DPDK
 			gvs.sendPacketToDPDK(pkt)
 			pkt.DecRef()
@@ -347,15 +332,8 @@ func (gvs *GVisorNetstack) processDPDKPacket(data []byte) {
 		return
 	}
 
-	// 解析IP头部信息进行调试
-	srcIP := net.IP(ipPacket[12:16])
-	dstIP := net.IP(ipPacket[16:20])
-	protocol := ipPacket[9]
-
-	// 检查是否是VXLAN包（Protocol 47 是GRE，Protocol 17且目标端口4789是VXLAN）
-	if protocol == 47 || (protocol == 17 && gvs.isVXLANPacket(ipPacket)) {
-		log.Printf("[VXLAN-RX] Received VXLAN packet from %s -> %s, Protocol: %d, Length: %d",
-			srcIP, dstIP, protocol, len(ipPacket))
+	// 检查是否是VXLAN包Protocol 17且目标端口4789是VXLAN
+	if gvs.isVXLANPacket(ipPacket) {
 
 		// 尝试VXLAN解封装
 		innerPacket, err := gvs.decapsulateVXLANPacket(ipPacket)
@@ -366,25 +344,9 @@ func (gvs *GVisorNetstack) processDPDKPacket(data []byte) {
 		}
 
 		if innerPacket != nil {
-			log.Printf("[VXLAN] VXLAN decapsulation successful, inner packet length: %d", len(innerPacket))
 			// 递归处理内层包
 			gvs.processInnerPacket(innerPacket)
 			return
-		}
-	}
-
-	// 如果是TCP或UDP，解析端口信息（特别关注4789端口）
-	if protocol == 6 || protocol == 17 { // TCP or UDP
-		ipHeaderLen := (ipPacket[0] & 0x0F) * 4
-		if len(ipPacket) >= int(ipHeaderLen)+4 {
-			srcPort := uint16(ipPacket[ipHeaderLen])<<8 | uint16(ipPacket[ipHeaderLen+1])
-			dstPort := uint16(ipPacket[ipHeaderLen+2])<<8 | uint16(ipPacket[ipHeaderLen+3])
-
-			// 特别检查是否是VXLAN端口
-			if protocol == 17 && (srcPort == 4789 || dstPort == 4789) {
-				log.Printf("[VXLAN-RX] *** UDP packet with VXLAN port 4789 - %s:%d -> %s:%d ***",
-					srcIP, srcPort, dstIP, dstPort)
-			}
 		}
 	}
 
@@ -402,7 +364,9 @@ func (gvs *GVisorNetstack) processDPDKPacket(data []byte) {
 	pkt.DecRef()
 
 	gvs.stats.PacketsProcessed++
-} // sendPacketToDPDK 将 netstack 的数据包发送到 DPDK
+}
+
+// sendPacketToDPDK 将 netstack 的数据包发送到 DPDK
 func (gvs *GVisorNetstack) sendPacketToDPDK(pkt *stack.PacketBuffer) {
 	// 移除详细的发包日志，专注于收包调试
 
