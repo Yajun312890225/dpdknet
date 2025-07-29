@@ -3,7 +3,6 @@ package dpdknet
 import (
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -47,15 +46,12 @@ func ListenTCP(network string, laddr *TCPAddr) (*TCPListener, error) {
 	}
 
 	// 强制使用 gVisor netstack
-	log.Printf("[DEBUG] Creating TCP listener using gVisor netstack")
 	gvisorListener, err := CreateGVisorTCPListener(uint16(laddr.Port))
 	if err != nil {
-		log.Printf("[ERROR] Failed to create gVisor TCP listener: %v", err)
 		return nil, fmt.Errorf("failed to create gVisor TCP listener: %v", err)
 	}
 
 	listener.gvisorListener = gvisorListener
-	log.Printf("[INFO] TCP listener created using gVisor netstack on port %d", laddr.Port)
 	return listener, nil
 }
 
@@ -76,8 +72,6 @@ func ListenTCPWithVXLAN(network string, laddr *TCPAddr) (*TCPListener, error) {
 			uint16(laddr.Port),
 		)
 	}
-
-	log.Printf("[INFO] TCP listener enabled VXLAN encapsulation with VNI %d", GetGlobalVXLANConfig().VNI)
 
 	return listener, nil
 }
@@ -104,8 +98,8 @@ func (l *TCPListener) Accept() (net.Conn, error) {
 	tcpConn := &TCPConn{
 		localAddr:    l.localAddr,
 		gvisorConn:   gvisorConn,
-		vxlanConfig:  l.vxlanConfig,  // 传递 VXLAN 配置
-		vxlanHandler: l.vxlanHandler, // 传递 VXLAN 处理器
+		vxlanConfig:  l.vxlanConfig,
+		vxlanHandler: l.vxlanHandler,
 	}
 
 	// 尝试获取远程地址
@@ -119,8 +113,6 @@ func (l *TCPListener) Accept() (net.Conn, error) {
 		}
 	}
 
-	log.Printf("[DEBUG] Accepted new TCP connection: %s -> %s",
-		tcpConn.RemoteAddr().String(), tcpConn.LocalAddr().String())
 	return tcpConn, nil
 }
 
@@ -145,11 +137,9 @@ func (l *TCPListener) Close() error {
 	// 强制使用 gVisor，关闭 gVisor 监听器
 	if l.gvisorListener != nil {
 		err := l.gvisorListener.Close()
-		log.Printf("[DEBUG] gVisor TCP listener closed")
 		return err
 	}
 
-	log.Printf("[DEBUG] TCP listener closed: %s", l.localAddr.String())
 	return nil
 }
 
@@ -163,6 +153,7 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 	if err := EnsureGlobalNetworkInit(); err != nil {
 		return nil, err
 	}
+
 	if raddr == nil {
 		return nil, fmt.Errorf("remote address cannot be nil")
 	}
@@ -183,18 +174,19 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 		Zone: raddr.Zone,
 	}
 
-	// 创建 TCP 连接 - 注意这里创建的是内层连接，实际传输通过 VXLAN
-	// gVisor 会处理 TCP 协议栈，但数据包会通过 VXLAN 封装后发送
+	// 创建 TCP 连接
 	gvisorConn, err := CreateGVisorTCPConnWithTimeout(localAddr, remoteAddr, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create TCP connection: %v", err)
 	}
+
 	// 创建TCPConn包装器
 	tcpConn := &TCPConn{
 		localAddr:  laddr,
 		remoteAddr: raddr,
 		gvisorConn: gvisorConn,
 	}
+
 	// 如果本地地址为空，尝试从连接中获取
 	if tcpConn.localAddr == nil {
 		if localAddrFromConn := gvisorConn.LocalAddr(); localAddrFromConn != nil {
@@ -207,6 +199,7 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 			}
 		}
 	}
+
 	return tcpConn, nil
 }
 
@@ -216,10 +209,9 @@ func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 	vxlanConfig := GetGlobalVXLANConfig()
 
 	// VXLAN 场景：raddr 是内层目标地址，实际的外层通信在 VTEP 之间进行
-	// 1. 创建本地 TCP 监听器，绑定到 VXLAN 本地地址
 	vxlanLocalAddr := &TCPAddr{
-		IP:   vxlanConfig.LocalIP, // 使用 VXLAN 本地 VTEP IP
-		Port: 0,                   // 让系统分配端口
+		IP:   vxlanConfig.LocalIP,
+		Port: 0,
 	}
 
 	// 如果用户指定了本地地址，使用用户指定的端口
@@ -227,9 +219,18 @@ func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 		vxlanLocalAddr.Port = laddr.Port
 	}
 
-	// 2. 创建 TCP 连接 - 在 VXLAN 场景下使用内层地址
 	var gvisorConn net.Conn
 	var actualLocalAddr *TCPAddr
+	var err error
+
+	// 预先注册 VXLAN 配置，使用端口 0 作为通配符
+	if globalGVisorStack != nil {
+		if laddr != nil {
+			globalGVisorStack.RegisterVXLANConnection(laddr.IP, 0)
+		} else {
+			globalGVisorStack.RegisterVXLANConnection(vxlanConfig.LocalIP, 0)
+		}
+	}
 
 	if laddr != nil {
 		// 如果指定了内层本地地址，使用它创建 gVisor 连接
@@ -238,7 +239,6 @@ func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 			Port: raddr.Port,
 			Zone: raddr.Zone,
 		}
-		var err error
 		gvisorConn, err = CreateGVisorTCPConnWithLocalAddr(laddr.IP, uint16(laddr.Port), remoteAddr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gVisor TCP connection with local addr %s:%d: %v", laddr.IP, laddr.Port, err)
@@ -251,7 +251,6 @@ func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 			Port: raddr.Port,
 			Zone: raddr.Zone,
 		}
-		var err error
 		gvisorConn, err = CreateGVisorTCPConn(nil, remoteAddr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gVisor TCP connection: %v", err)
@@ -265,34 +264,32 @@ func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 		gvisorConn: gvisorConn,
 	}
 
-	// 3. 配置 VXLAN
+	// 配置 VXLAN
 	conn.vxlanConfig = vxlanConfig
-	// 优先使用全局处理器，如果不存在则创建新的
 	if globalHandler := GetGlobalVXLANHandler(); globalHandler != nil {
 		conn.vxlanHandler = globalHandler
 	} else {
 		conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
 	}
 
-	// 4. 注册 VXLAN 连接
-	if globalGVisorStack != nil {
-		localPort := uint16(0)
-		if actualLocalAddr != nil {
-			localPort = uint16(actualLocalAddr.Port)
+	// 注册 VXLAN 连接（更新为实际端口）
+	if globalGVisorStack != nil && actualLocalAddr != nil {
+		localPort := uint16(actualLocalAddr.Port)
+		if localPort != 0 {
+			globalGVisorStack.RegisterVXLANConnection(
+				actualLocalAddr.IP,
+				localPort,
+			)
 		}
-		globalGVisorStack.RegisterVXLANConnection(
-			vxlanConfig.LocalIP,
-			localPort,
-		)
-		log.Printf("[INFO] Registered VXLAN connection for outbound TCP: local=%s:%d, VNI=%d",
-			vxlanConfig.LocalIP, localPort, vxlanConfig.VNI)
 	}
 
-	log.Printf("[INFO] TCP connection enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
 	return conn, nil
 }
 
 func (c *TCPConn) Read(buf []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.closed {
 		return 0, errors.New("connection closed")
 	}
@@ -301,7 +298,8 @@ func (c *TCPConn) Read(buf []byte) (int, error) {
 		return 0, errors.New("gVisor connection not available")
 	}
 
-	return c.gvisorConn.Read(buf)
+	n, err := c.gvisorConn.Read(buf)
+	return n, err
 }
 
 func (c *TCPConn) Write(data []byte) (int, error) {
@@ -316,21 +314,22 @@ func (c *TCPConn) Write(data []byte) (int, error) {
 		return 0, errors.New("gVisor connection not available")
 	}
 
-	return c.gvisorConn.Write(data)
+	n, err := c.gvisorConn.Write(data)
+	return n, err
 }
 
 func (c *TCPConn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if c.closed {
 		return nil
 	}
+
 	c.closed = true
 
-	// 强制使用 gVisor，关闭 gVisor 连接
 	if c.gvisorConn != nil {
 		err := c.gvisorConn.Close()
-		log.Printf("[DEBUG] gVisor TCP connection closed")
 		return err
 	}
 

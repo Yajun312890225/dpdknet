@@ -2,7 +2,6 @@ package dpdknet
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"os/exec"
 	"strings"
@@ -159,7 +158,7 @@ func isRemoteNetwork(ip net.IP) bool {
 
 	// 如果不是11.x.x.x网段，认为是远程网络
 	return ip4[0] != 11
-} 
+}
 
 // querySystemARP 查询系统ARP表获取MAC地址
 func querySystemARP(ipStr string) net.HardwareAddr {
@@ -468,7 +467,7 @@ func getRemoteMACFromARP(remoteIP net.IP) net.HardwareAddr {
 	ipStr := remoteIP.String()
 	out, err := execCommand("arp", []string{"-n", ipStr})
 	if err != nil {
-		log.Printf("[WARN] ARP 查询失败: %v", err)
+		// 暂时忽略错误
 		// 查询失败时，返回广播 MAC，防止 nil
 		return net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 	}
@@ -482,7 +481,6 @@ func getRemoteMACFromARP(remoteIP net.IP) net.HardwareAddr {
 			}
 		}
 	}
-	log.Printf("[WARN] 未找到 ARP MAC, IP: %s，使用广播 MAC", ipStr)
 	return net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 }
 
@@ -524,14 +522,12 @@ func (vh *VXLANHandler) GetConfig() *VXLANConfig {
 // -------------------- VXLAN 包处理入口 --------------------
 // handleIncomingVXLANPacket 处理传入的 VXLAN 包
 func handleIncomingVXLANPacket(data []byte) {
-
 	// 检查是否为 VXLAN 包
 	if !IsVXLANPacket(data) {
 		return
 	}
 
 	// 直接注入原始的VXLAN内层数据到gVisor
-	// VXLAN解包已经返回了完整的内层以太网帧，不需要重新构建
 	if gvisor := GetGVisorNetstack(); gvisor != nil {
 		// 从VXLAN包中提取完整的内层以太网帧
 		packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
@@ -539,6 +535,7 @@ func handleIncomingVXLANPacket(data []byte) {
 		if vxlanLayer != nil {
 			vxlan := vxlanLayer.(*layers.VXLAN)
 			innerEthernetFrame := vxlan.LayerPayload() // 完整的内层以太网帧
+
 			// 检查内层以太网帧的MAC地址
 			if len(innerEthernetFrame) >= 14 {
 				// 修复目标MAC地址：将内层目标MAC替换为本地gVisor的MAC地址
@@ -550,7 +547,6 @@ func handleIncomingVXLANPacket(data []byte) {
 		}
 	}
 }
-
 
 // -------------------- VXLAN 核心处理方法 --------------------
 
@@ -629,7 +625,6 @@ func constructInnerIPPacket(payload []byte, srcIP, dstIP net.IP, srcPort, dstPor
 	}
 
 	if err != nil {
-		log.Printf("[ERROR] Failed to serialize inner IP packet: %v", err)
 		return nil
 	}
 

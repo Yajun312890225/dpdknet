@@ -39,7 +39,6 @@ func getLocalIPFromEnv() net.IP {
 		if ip := net.ParseIP(ipStr); ip != nil {
 			return ip.To4()
 		}
-		log.Printf("[WARNING] Invalid IP address in DPDKNET_LOCAL_IP: %s, using default", ipStr)
 	}
 	// 默认IP地址
 	return net.IPv4(192, 168, 66, 57)
@@ -51,7 +50,6 @@ func getRemoteVTEPFromEnv() net.IP {
 		if ip := net.ParseIP(ipStr); ip != nil {
 			return ip.To4()
 		}
-		log.Printf("[WARNING] Invalid IP address in DPDKNET_REMOTE_VTEP: %s, using default", ipStr)
 	}
 	// 默认远程 VTEP IP地址
 	return net.IPv4(192, 168, 66, 29)
@@ -243,7 +241,6 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 		gvisor.InjectDPDKPacket(data)
 		return
 	}
-
 }
 
 // globalSendGenerator 全局发送生成器 - 简化为只处理包通道
@@ -271,7 +268,6 @@ func SendRawBytes(data []byte) error {
 		return nil
 	default:
 		// 队列满时立即失败，不重试（避免阻塞）
-		log.Printf("[ERROR] Byte send queue full (%d/65536), dropping packet immediately", len(globalBytesCh))
 		return fmt.Errorf("global byte send channel full")
 	}
 } // SendPacket 通过全局发送通道发送数据包，非阻塞
@@ -282,7 +278,6 @@ func SendPacket(pkt *packet.Packet) error {
 		return nil
 	default:
 		// 队列满时立即失败，不重试（避免阻塞和延迟）
-		log.Printf("[ERROR] Send queue full (%d/65536), dropping packet immediately", len(globalSendCh))
 		return fmt.Errorf("global send channel full")
 	}
 }

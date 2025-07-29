@@ -145,23 +145,24 @@ func udpClientExample(ip string) {
 }
 
 func handleTCPConnection(conn net.Conn) {
-	defer conn.Close()
+	defer func() {
+		err := conn.Close()
+		if err != nil {
+			// Silent error handling
+		}
+	}()
 
 	buffer := make([]byte, 1024)
 	for {
 		n, err := conn.Read(buffer)
 		if err != nil {
-			log.Printf("Read error: %v", err)
 			return
 		}
 
-		fmt.Printf("Received TCP data: %s\n", string(buffer[:n]))
-
-		// 回应
+		// Echo response
 		response := fmt.Sprintf("Echo: %s", string(buffer[:n]))
 		_, err = conn.Write([]byte(response))
 		if err != nil {
-			log.Printf("Write error: %v", err)
 			return
 		}
 	}
@@ -170,40 +171,73 @@ func handleTCPConnection(conn net.Conn) {
 func testNetworkConnectivity() {
 	// 测试到远程 VTEP 的连通性
 	remoteVTEP := "192.168.66.29"
-	fmt.Printf("  测试到远程 VTEP %s 的连通性...\n", remoteVTEP)
+	fmt.Printf("[DEBUG] 测试到远程 VTEP %s 的连通性...\n", remoteVTEP)
 
 	// 使用系统 ping 命令
+	fmt.Printf("[DEBUG] 执行 ping 命令...\n")
 	cmd := exec.Command("ping", "-c", "3", "-W", "2", remoteVTEP)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("  ❌ PING 失败: %v\n", err)
-		fmt.Printf("  输出: %s\n", string(output))
+		fmt.Printf("[ERROR] ❌ PING 失败: %v\n", err)
+		fmt.Printf("[DEBUG] PING 输出: %s\n", string(output))
 	} else {
-		fmt.Printf("  ✅ PING 成功\n")
+		fmt.Printf("[DEBUG] ✅ PING 成功\n")
+		// 解析ping统计信息
+		lines := strings.Split(string(output), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "packet loss") || strings.Contains(line, "min/avg/max") {
+				fmt.Printf("[DEBUG] PING 统计: %s\n", strings.TrimSpace(line))
+			}
+		}
 	}
 
 	// 检查 ARP 表
-	fmt.Printf("  检查 ARP 表中的 %s...\n", remoteVTEP)
+	fmt.Printf("[DEBUG] 检查 ARP 表中的 %s...\n", remoteVTEP)
 	cmd = exec.Command("arp", "-n", remoteVTEP)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("  ❌ ARP 查询失败: %v\n", err)
+		fmt.Printf("[ERROR] ❌ ARP 查询失败: %v\n", err)
 	} else {
-		fmt.Printf("  ARP 信息: %s\n", string(output))
+		fmt.Printf("[DEBUG] ARP 信息: %s\n", strings.TrimSpace(string(output)))
 	}
 
 	// 检查路由表
-	fmt.Printf("  检查到 %s 的路由...\n", remoteVTEP)
+	fmt.Printf("[DEBUG] 检查到 %s 的路由...\n", remoteVTEP)
 	cmd = exec.Command("ip", "route", "get", remoteVTEP)
 	output, err = cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("  ❌ 路由查询失败: %v\n", err)
+		fmt.Printf("[ERROR] ❌ 路由查询失败: %v\n", err)
 	} else {
-		fmt.Printf("  路由信息: %s\n", string(output))
+		fmt.Printf("[DEBUG] 路由信息: %s\n", strings.TrimSpace(string(output)))
+	}
+
+	// 检查本地网络接口
+	fmt.Printf("[DEBUG] 检查本地网络接口...\n")
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		fmt.Printf("[ERROR] 获取网络接口失败: %v\n", err)
+	} else {
+		for _, iface := range interfaces {
+			if iface.Flags&net.FlagUp != 0 && iface.Flags&net.FlagLoopback == 0 {
+				fmt.Printf("[DEBUG] 活动接口: %s (MAC: %s)\n", iface.Name, iface.HardwareAddr)
+
+				addrs, err := iface.Addrs()
+				if err == nil {
+					for _, addr := range addrs {
+						if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+							if ipnet.IP.To4() != nil {
+								fmt.Printf("[DEBUG]   IPv4: %s\n", ipnet.IP)
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
 func validateVXLANConfig(config *dpdknet.VXLANConfig) {
+	fmt.Printf("[DEBUG] VXLAN配置验证:\n")
 	fmt.Printf("  VNI: %d\n", config.VNI)
 	fmt.Printf("  本地 VTEP: %s\n", config.LocalIP)
 	fmt.Printf("  远程 VTEP: %s\n", config.RemoteIP)
@@ -211,14 +245,63 @@ func validateVXLANConfig(config *dpdknet.VXLANConfig) {
 	fmt.Printf("  本地 MAC: %s\n", config.LocalMAC)
 	fmt.Printf("  远程 MAC: %s\n", config.RemoteMAC)
 
+	// 验证配置有效性
+	if config.VNI == 0 {
+		fmt.Printf("[WARNING] VNI为0，这可能不是有效的VNI值\n")
+	}
+	if config.LocalIP == nil {
+		fmt.Printf("[ERROR] 本地VTEP IP未设置\n")
+	}
+	if config.RemoteIP == nil {
+		fmt.Printf("[ERROR] 远程VTEP IP未设置\n")
+	}
+	if config.UDPPort == 0 {
+		fmt.Printf("[WARNING] VXLAN UDP端口为0，使用默认值4789\n")
+	}
+	if isZeroMAC(config.LocalMAC) {
+		fmt.Printf("[WARNING] 本地MAC地址为零值\n")
+	}
+	if isZeroMAC(config.RemoteMAC) {
+		fmt.Printf("[WARNING] 远程MAC地址为零值\n")
+	}
+
 	// 检查远程端口是否开放
-	fmt.Printf("  检查远程 VXLAN 端口 %s:%d...\n", config.RemoteIP, config.UDPPort)
-	conn, err := net.DialTimeout("udp", fmt.Sprintf("%s:%d", config.RemoteIP, config.UDPPort), 2*time.Second)
-	if err != nil {
-		fmt.Printf("  ❌ 无法连接到远程 VXLAN 端口: %v\n", err)
+	if config.RemoteIP != nil && config.UDPPort > 0 {
+		remoteAddr := fmt.Sprintf("%s:%d", config.RemoteIP, config.UDPPort)
+		fmt.Printf("[DEBUG] 检查远程 VXLAN 端口 %s...\n", remoteAddr)
+
+		// 测试UDP连接（VXLAN使用UDP）
+		conn, err := net.DialTimeout("udp", remoteAddr, 2*time.Second)
+		if err != nil {
+			fmt.Printf("[ERROR] ❌ 无法连接到远程 VXLAN 端口: %v\n", err)
+			fmt.Printf("[DEBUG] 这可能表明:\n")
+			fmt.Printf("  1. 远程VTEP未启动\n")
+			fmt.Printf("  2. 防火墙阻止了VXLAN流量\n")
+			fmt.Printf("  3. 网络路由问题\n")
+		} else {
+			fmt.Printf("[DEBUG] ✅ 远程 VXLAN 端口可达\n")
+			conn.Close()
+		}
+	}
+
+	// 检查ARP缓存
+	if config.ARPCache != nil && len(config.ARPCache) > 0 {
+		fmt.Printf("[DEBUG] ARP缓存条目数: %d\n", len(config.ARPCache))
+		for ip, mac := range config.ARPCache {
+			fmt.Printf("[DEBUG]   %s -> %s\n", ip, mac)
+		}
 	} else {
-		fmt.Printf("  ✅ 远程 VXLAN 端口可达\n")
-		conn.Close()
+		fmt.Printf("[DEBUG] ARP缓存为空\n")
+	}
+
+	// 检查网关配置
+	if config.GatewayIP != nil {
+		fmt.Printf("[DEBUG] 网关IP: %s\n", config.GatewayIP)
+		if config.GatewayMAC != nil {
+			fmt.Printf("[DEBUG] 网关MAC: %s\n", config.GatewayMAC)
+		}
+	} else {
+		fmt.Printf("[DEBUG] 未配置网关\n")
 	}
 }
 
@@ -316,57 +399,122 @@ func tcpClientExample() {
 	fmt.Println("\n=== TCP Client with Global VXLAN Example ===")
 
 	// 确保在创建连接前先初始化网络系统（这会使用新的环境变量并配置VXLAN）
+	fmt.Println("[DEBUG] 开始初始化网络系统...")
 	if err := dpdknet.EnsureGlobalNetworkInit(); err != nil {
 		log.Fatalf("网络初始化失败: %v", err)
 	}
+	fmt.Println("[DEBUG] ✅ 网络系统初始化成功")
 
 	// 检查全局VXLAN配置是否可用
+	fmt.Println("[DEBUG] 检查全局VXLAN配置...")
 	if !dpdknet.IsVXLANEnabled() {
 		log.Fatalf("全局VXLAN配置未初始化")
 	}
+	fmt.Println("[DEBUG] ✅ 全局VXLAN配置可用")
 
 	globalConfig := dpdknet.GetGlobalVXLANConfig()
-	fmt.Printf("使用全局VXLAN配置: VNI=%d, %s -> %s\n",
-		globalConfig.VNI, globalConfig.LocalIP, globalConfig.RemoteIP)
+	fmt.Printf("[DEBUG] 使用全局VXLAN配置:\n")
+	fmt.Printf("  VNI: %d\n", globalConfig.VNI)
+	fmt.Printf("  本地VTEP: %s (MAC: %s)\n", globalConfig.LocalIP, globalConfig.LocalMAC)
+	fmt.Printf("  远程VTEP: %s (MAC: %s)\n", globalConfig.RemoteIP, globalConfig.RemoteMAC)
+	fmt.Printf("  VXLAN端口: %d\n", globalConfig.UDPPort)
+
+	// 验证VXLAN配置
+	fmt.Println("[DEBUG] 验证VXLAN配置...")
+	validateVXLANConfig(globalConfig)
+
+	// 测试网络连通性
+	fmt.Println("[DEBUG] 测试网络连通性...")
+	testNetworkConnectivity()
 
 	// 创建内层本地地址（OSPF 网络地址）
+	fmt.Println("[DEBUG] 创建内层本地地址...")
 	innerLocalAddr, err := dpdknet.ResolveTCPAddr("tcp", "11.1.1.2:0") // 将自动在gVisor中配置此地址
 	if err != nil {
 		log.Fatalf("Failed to resolve inner local address: %v", err)
 	}
+	fmt.Printf("[DEBUG] ✅ 内层本地地址: %s\n", innerLocalAddr)
 
-	conn, err := dpdknet.Dial("tcp", "192.168.66.29:8000",
+	// 准备连接参数
+	targetAddr := "124.221.130.129:8080"
+	fmt.Printf("[DEBUG] 准备连接到目标地址: %s\n", targetAddr)
+	fmt.Printf("[DEBUG] 使用内层本地地址: %s\n", innerLocalAddr)
+	fmt.Printf("[DEBUG] 启用VXLAN封装\n")
+
+	// 建立TCP连接
+	fmt.Println("[DEBUG] 开始建立TCP连接...")
+	startTime := time.Now()
+	conn, err := dpdknet.Dial("tcp", targetAddr,
 		dpdknet.WithLocalAddr(innerLocalAddr),
 		dpdknet.WithVXLAN())
 	if err != nil {
+		fmt.Printf("[ERROR] TCP连接失败: %v\n", err)
+		fmt.Printf("[ERROR] 连接用时: %v\n", time.Since(startTime))
+
+		// 详细的错误分析
+		fmt.Println("[DEBUG] 开始错误分析...")
+		analyzeConnectionError(err, targetAddr, globalConfig)
 		log.Fatalf("Failed to dial TCP with VXLAN: %v", err)
 	}
-	defer conn.Close()
+
+	// 添加详细的连接关闭日志
+	defer func() {
+		log.Printf("[CLIENT] 🔚 Starting connection closure process...")
+		log.Printf("[CLIENT] 🔍 Connection details before close: %s -> %s", conn.LocalAddr(), conn.RemoteAddr())
+		log.Printf("[CLIENT] 📡 About to send FIN packet...")
+
+		closeStartTime := time.Now()
+		err := conn.Close()
+		closeDuration := time.Since(closeStartTime)
+
+		if err != nil {
+			log.Printf("[CLIENT] ❌ Error closing connection after %v: %v", closeDuration, err)
+		} else {
+			log.Printf("[CLIENT] ✅ Connection close operation completed successfully in %v", closeDuration)
+			log.Printf("[CLIENT] 🚨 FIN packet should have been sent to server")
+		}
+
+		// 等待一下，让网络包处理完成
+		log.Printf("[CLIENT] 🕐 Waiting briefly for network packet processing...")
+		time.Sleep(time.Millisecond * 100)
+		log.Printf("[CLIENT] 🔚 Connection closure process finished")
+	}()
+
+	connectTime := time.Since(startTime)
+	fmt.Printf("[DEBUG] ✅ TCP连接建立成功! 用时: %v\n", connectTime)
+	fmt.Printf("[DEBUG] 本地地址: %s\n", conn.LocalAddr())
+	fmt.Printf("[DEBUG] 远程地址: %s\n", conn.RemoteAddr())
 
 	fmt.Printf("Outer VTEP: %s -> %s\n", globalConfig.LocalIP, globalConfig.RemoteIP)
 	fmt.Printf("VXLAN VNI: %d, Local VTEP: %s, Remote VTEP: %s\n",
 		globalConfig.VNI, globalConfig.LocalIP, globalConfig.RemoteIP)
 
 	// 发送数据
-	fmt.Println("发送测试数据...")
-	message := "Hello from TCP Client"
+	fmt.Println("\n[DEBUG] 开始发送测试数据...")
+	message := "Hello from TCP Client with VXLAN Debug"
 
-	fmt.Printf("  准备发送消息: %s\n", message)
-	fmt.Printf("  使用全局 VXLAN 配置:\n")
-	fmt.Printf("    本地 VTEP: %s (MAC: %s)\n", globalConfig.LocalIP, globalConfig.LocalMAC)
-	fmt.Printf("    远程 VTEP: %s (MAC: %s)\n", globalConfig.RemoteIP, globalConfig.RemoteMAC)
-	fmt.Printf("    VNI: %d, UDP 端口: %d\n", globalConfig.VNI, globalConfig.UDPPort)
+	fmt.Printf("[DEBUG] 准备发送消息: %s\n", message)
+	fmt.Printf("[DEBUG] 消息长度: %d 字节\n", len(message))
+	fmt.Printf("[DEBUG] 使用全局 VXLAN 配置:\n")
+	fmt.Printf("  本地 VTEP: %s (MAC: %s)\n", globalConfig.LocalIP, globalConfig.LocalMAC)
+	fmt.Printf("  远程 VTEP: %s (MAC: %s)\n", globalConfig.RemoteIP, globalConfig.RemoteMAC)
+	fmt.Printf("  VNI: %d, UDP 端口: %d\n", globalConfig.VNI, globalConfig.UDPPort)
 
-	_, err = conn.Write([]byte(message))
+	writeStart := time.Now()
+	n, err := conn.Write([]byte(message))
+	writeTime := time.Since(writeStart)
+
 	if err != nil {
+		fmt.Printf("[ERROR] TCP写入失败: %v\n", err)
+		fmt.Printf("[ERROR] 写入用时: %v\n", writeTime)
 		log.Printf("Write error: %v", err)
 		return
 	}
 
-	fmt.Printf("  ✅ TCP 数据写入成功\n")
+	fmt.Printf("[DEBUG] ✅ TCP 数据写入成功! 写入 %d 字节, 用时: %v\n", n, writeTime)
 
 	// 尝试读取响应
-	fmt.Println("  等待服务器响应...")
+	fmt.Println("[DEBUG] 等待服务器响应...")
 	buffer := make([]byte, 1024)
 
 	// 使用goroutine和channel实现超时读取
@@ -375,8 +523,21 @@ func tcpClientExample() {
 		err error
 	}, 1)
 
+	readStart := time.Now()
 	go func() {
+		fmt.Println("[DEBUG] 开始读取协程...")
+		log.Printf("[CLIENT] 📥 Starting read operation from %s...", conn.RemoteAddr())
+
 		n, err := conn.Read(buffer)
+		readTime := time.Since(readStart)
+
+		log.Printf("[CLIENT] 📊 Read operation completed: %d bytes, time: %v, error: %v", n, readTime, err)
+		fmt.Printf("[DEBUG] 读取完成: %d 字节, 用时: %v, 错误: %v\n", n, readTime, err)
+
+		if err == nil && n > 0 {
+			log.Printf("[CLIENT] 📨 Received data from %s: %s", conn.RemoteAddr(), string(buffer[:n]))
+		}
+
 		resultCh <- struct {
 			n   int
 			err error
@@ -386,15 +547,78 @@ func tcpClientExample() {
 	select {
 	case result := <-resultCh:
 		if result.err != nil {
+			fmt.Printf("[ERROR] 读取错误: %v\n", result.err)
 			log.Printf("Read error: %v", result.err)
 		} else {
-			fmt.Printf("  收到服务器响应: %s\n", string(buffer[:result.n]))
+			fmt.Printf("[DEBUG] ✅ 收到服务器响应 (%d 字节): %s\n", result.n, string(buffer[:result.n]))
 		}
-	case <-time.After(5 * time.Second):
-		fmt.Printf("  读取超时，可能服务器未响应\n")
+	case <-time.After(3 * time.Second): // 减少超时时间到3秒
+		fmt.Printf("[WARNING] 读取超时(3秒)，可能服务器未响应\n")
+
+		// 超时时进行额外的调试
+		fmt.Println("[DEBUG] 超时调试信息:")
+		fmt.Printf("  连接状态: 可能仍然有效\n")
+		fmt.Printf("  建议检查服务器是否正在监听 %s\n", targetAddr)
+		fmt.Printf("  建议检查VXLAN隧道是否正常工作\n")
 	}
 
 	// 等待一段时间让数据包发送完成
-	time.Sleep(500 * time.Millisecond)
-	fmt.Println("TCP 客户端测试完成，完整的网络协议栈测试完成")
+	fmt.Println("[DEBUG] 等待数据包发送完成...")
+	time.Sleep(300 * time.Millisecond) // 减少等待时间
+
+	fmt.Println("[DEBUG] TCP 客户端测试完成，完整的网络协议栈测试完成")
+
+	// 最终统计
+	totalTime := time.Since(startTime)
+	fmt.Printf("[SUMMARY] 总用时: %v (连接: %v, 写入: %v)\n", totalTime, connectTime, writeTime)
+
+	// 强制等待一下，确保 defer 中的 close 有时间执行
+	fmt.Println("[DEBUG] 等待连接关闭完成...")
+	time.Sleep(100 * time.Millisecond)
+}
+
+// 分析连接错误的详细信息
+func analyzeConnectionError(err error, targetAddr string, config *dpdknet.VXLANConfig) {
+	fmt.Printf("[DEBUG] 错误分析: %v\n", err)
+
+	// 解析目标地址
+	host, port, splitErr := net.SplitHostPort(targetAddr)
+	if splitErr != nil {
+		fmt.Printf("[ERROR] 无法解析目标地址: %v\n", splitErr)
+		return
+	}
+
+	fmt.Printf("[DEBUG] 目标主机: %s, 端口: %s\n", host, port)
+
+	// 检查DNS解析
+	fmt.Printf("[DEBUG] 检查DNS解析...\n")
+	ips, dnsErr := net.LookupIP(host)
+	if dnsErr != nil {
+		fmt.Printf("[ERROR] DNS解析失败: %v\n", dnsErr)
+	} else {
+		fmt.Printf("[DEBUG] DNS解析成功: %v\n", ips)
+	}
+
+	// 检查是否可以通过标准网络栈连接
+	fmt.Printf("[DEBUG] 测试标准TCP连接...\n")
+	stdConn, stdErr := net.DialTimeout("tcp", targetAddr, 5*time.Second)
+	if stdErr != nil {
+		fmt.Printf("[ERROR] 标准TCP连接也失败: %v\n", stdErr)
+		fmt.Printf("[DEBUG] 这表明目标服务器可能不可达或未监听该端口\n")
+	} else {
+		stdConn.Close()
+		fmt.Printf("[DEBUG] ✅ 标准TCP连接成功，问题可能在VXLAN层\n")
+	}
+
+	// 检查VXLAN配置
+	fmt.Printf("[DEBUG] 检查VXLAN配置有效性...\n")
+	if config.LocalIP == nil {
+		fmt.Printf("[ERROR] 本地VTEP IP为空\n")
+	}
+	if config.RemoteIP == nil {
+		fmt.Printf("[ERROR] 远程VTEP IP为空\n")
+	}
+	if config.VNI == 0 {
+		fmt.Printf("[WARNING] VNI为0，可能不是有效值\n")
+	}
 }
