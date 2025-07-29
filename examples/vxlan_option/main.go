@@ -143,13 +143,19 @@ func udpClientExample() {
 		vxlanConfig.RemoteMAC = targetMAC
 	}
 
+	// 设置网关信息 - 模拟DHCP获取的网关
+	gatewayIP := net.ParseIP("10.10.10.2")
+	gatewayMAC, _ := net.ParseMAC("d8:85:c0:a8:42:1d") // 从用户日志中看到的网关MAC
+	vxlanConfig.SetGateway(gatewayIP, gatewayMAC)
+	fmt.Printf("[VXLAN] 设置网关: %s (MAC: %s)\n", gatewayIP, gatewayMAC)
+
 	// 创建内层本地地址（OSPF 网络地址）
 	innerLocalAddr, err := dpdknet.ResolveUDPAddr("udp", "11.1.1.2:0") // 将自动在gVisor中配置此地址
 	if err != nil {
 		log.Fatalf("Failed to resolve inner local address: %v", err)
 	}
 
-	conn, err := dpdknet.Dial("udp", "192.168.66.29:8000",
+	conn, err := dpdknet.Dial("udp", "43.136.167.182:8000",
 		dpdknet.WithLocalAddr(innerLocalAddr),
 		dpdknet.WithVXLAN(vxlanConfig))
 	if err != nil {

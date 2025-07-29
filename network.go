@@ -187,6 +187,10 @@ func initializeVXLANNetworkStack() error {
 	log.Printf("[VXLAN] DHCP 完成: 分配IP=%s, 网关=%s, 网关MAC=%s",
 		vxlanIP, gatewayIP, gatewayMAC)
 
+	// 设置网关信息到VXLAN配置中
+	vxlanConfig.SetGateway(gatewayIP, gatewayMAC)
+	log.Printf("[VXLAN] 已将网关信息设置到VXLAN配置中")
+
 	// 创建 ARP 处理器
 	arpHandler := NewARPHandler(vxlanIP, vxlanConfig.LocalMAC, vxlanConfig)
 

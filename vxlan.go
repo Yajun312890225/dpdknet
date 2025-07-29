@@ -24,6 +24,10 @@ type VXLANConfig struct {
 	// ARP缓存，用于存储内层网络的IP到MAC映射
 	ARPCache map[string]net.HardwareAddr // key: IP地址字符串, value: MAC地址
 	ARPMutex sync.RWMutex                // 保护ARP缓存的读写锁
+
+	// 网关信息
+	GatewayIP  net.IP           // 网关IP地址
+	GatewayMAC net.HardwareAddr // 网关MAC地址
 }
 
 // DefaultVXLANConfig 默认 VXLAN 配置
@@ -80,7 +84,80 @@ func (config *VXLANConfig) SetARPEntry(ip net.IP, mac net.HardwareAddr) {
 	config.ARPCache[ip.String()] = mac
 }
 
-// querySystemARP 查询系统ARP表获取MAC地址
+// SetGateway 设置网关信息
+func (config *VXLANConfig) SetGateway(gatewayIP net.IP, gatewayMAC net.HardwareAddr) {
+	config.GatewayIP = gatewayIP
+	config.GatewayMAC = gatewayMAC
+	// 同时也将网关添加到ARP缓存中
+	config.SetARPEntry(gatewayIP, gatewayMAC)
+}
+
+// GetDestinationMAC 获取目标MAC地址，如果是跨网段则返回网关MAC
+func (config *VXLANConfig) GetDestinationMAC(dstIP net.IP) net.HardwareAddr {
+	// 检查目标IP是否为内网地址
+	if isPublicIP(dstIP) || isRemoteNetwork(dstIP) {
+		// 对于公网IP或跨网段的地址，使用网关MAC
+		if config.GatewayMAC != nil {
+			return config.GatewayMAC
+		}
+	}
+
+	// 同网段或直连的情况，从ARP缓存获取
+	return config.GetMACFromARP(dstIP)
+} // isPublicIP 检查IP是否为公网地址
+func isPublicIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+
+	// 检查是否为本地回环地址
+	if ip.IsLoopback() {
+		return false
+	}
+
+	// 检查是否为私有地址
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false // IPv6暂时不处理
+	}
+
+	// 10.0.0.0/8
+	if ip4[0] == 10 {
+		return false
+	}
+
+	// 172.16.0.0/12
+	if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+		return false
+	}
+
+	// 192.168.0.0/16
+	if ip4[0] == 192 && ip4[1] == 168 {
+		return false
+	}
+
+	// 169.254.0.0/16 (链路本地地址)
+	if ip4[0] == 169 && ip4[1] == 254 {
+		return false
+	}
+
+	return true // 是公网地址
+}
+
+// isRemoteNetwork 检查IP是否为远程网络（这里简化为非11.x.x.x网段）
+func isRemoteNetwork(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+
+	// 如果不是11.x.x.x网段，认为是远程网络
+	return ip4[0] != 11
+} // querySystemARP 查询系统ARP表获取MAC地址
 func querySystemARP(ipStr string) net.HardwareAddr {
 	// 先尝试ping来触发ARP
 	exec.Command("ping", "-c", "1", "-W", "1", ipStr).Run()
@@ -184,11 +261,10 @@ func (vh *VXLANHandler) EncapsulateVXLAN(innerPayload []byte, innerSrcIP, innerD
 
 	// 5. 构建内层以太网头
 	innerEthLayer := &layers.Ethernet{
-		SrcMAC:       generateInnerSrcMAC(innerSrcIP),     // 为源IP生成虚拟MAC
-		DstMAC:       vh.config.GetMACFromARP(innerDstIP), // 为目标IP使用ARP查询MAC
+		SrcMAC:       generateInnerSrcMAC(innerSrcIP),         // 为源IP生成虚拟MAC
+		DstMAC:       vh.config.GetDestinationMAC(innerDstIP), // 使用网关MAC或ARP查询的MAC
 		EthernetType: layers.EthernetTypeIPv4,
 	}
-
 	// 6. 直接使用原始内层 IP 包数据，而不是重新构建
 	// 序列化外层结构
 	layersToSerialize := []gopacket.SerializableLayer{
