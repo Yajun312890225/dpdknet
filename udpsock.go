@@ -55,27 +55,24 @@ func ListenUDP(network string, laddr *UDPAddr) (*UDPConn, error) {
 }
 
 // ListenUDPWithVXLAN 创建带 VXLAN 封装的 UDP 连接
-func ListenUDPWithVXLAN(network string, laddr *UDPAddr, vxlanConfig *VXLANConfig) (*UDPConn, error) {
+func ListenUDPWithVXLAN(network string, laddr *UDPAddr) (*UDPConn, error) {
 	conn, err := ListenUDP(network, laddr)
 	if err != nil {
 		return nil, err
 	}
 
-	if vxlanConfig != nil {
-		conn.vxlanConfig = vxlanConfig
-		conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
+	conn.vxlanConfig = GetGlobalVXLANConfig()
+	conn.vxlanHandler = GetGlobalVXLANHandler()
 
-		// 在全局网络栈中注册这个 VXLAN 连接
-		if globalGVisorStack != nil {
-			globalGVisorStack.RegisterVXLANConnection(
-				net.ParseIP("0.0.0.0"), // 监听所有接口
-				uint16(laddr.Port),
-				vxlanConfig,
-			)
-		}
-
-		log.Printf("[INFO] UDP connection enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
+	// 在全局网络栈中注册这个 VXLAN 连接
+	if globalGVisorStack != nil {
+		globalGVisorStack.RegisterVXLANConnection(
+			net.ParseIP("0.0.0.0"), // 监听所有接口
+			uint16(laddr.Port),
+		)
 	}
+
+	log.Printf("[INFO] UDP connection enabled VXLAN encapsulation with VNI %d", conn.vxlanConfig.VNI)
 
 	return conn, nil
 }
@@ -217,11 +214,9 @@ func (c *UDPConn) SetWriteDeadline(t time.Time) error {
 }
 
 // DialUDPWithVXLAN 创建带 VXLAN 封装的 UDP 连接
-func DialUDPWithVXLAN(network string, laddr, raddr *UDPAddr, vxlanConfig *VXLANConfig) (*UDPConn, error) {
-	if vxlanConfig == nil {
-		// 如果没有 VXLAN 配置，回退到普通 UDP
-		return DialUDP(network, laddr, raddr)
-	}
+// 如果 vxlanConfig 为 nil，则使用全局VXLAN配置
+func DialUDPWithVXLAN(network string, laddr, raddr *UDPAddr) (*UDPConn, error) {
+	vxlanConfig := GetGlobalVXLANConfig()
 
 	// VXLAN 场景：raddr 是内层目标地址，实际的外层通信在 VTEP 之间进行
 	// 1. 创建本地 UDP 监听器，绑定到 VXLAN 本地地址
@@ -267,7 +262,12 @@ func DialUDPWithVXLAN(network string, laddr, raddr *UDPAddr, vxlanConfig *VXLANC
 
 	// 4. 配置 VXLAN
 	conn.vxlanConfig = vxlanConfig
-	conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
+	// 优先使用全局处理器，如果不存在则创建新的
+	if globalHandler := GetGlobalVXLANHandler(); globalHandler != nil {
+		conn.vxlanHandler = globalHandler
+	} else {
+		conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
+	}
 
 	// 5. 注册 VXLAN 连接到全局网络栈
 	if globalGVisorStack != nil {
@@ -288,14 +288,12 @@ func DialUDPWithVXLAN(network string, laddr, raddr *UDPAddr, vxlanConfig *VXLANC
 		globalGVisorStack.RegisterVXLANConnection(
 			innerLocalIP,
 			innerLocalPort,
-			vxlanConfig,
 		)
 
 		// 注册内层目标地址和端口（这样可以捕获到发往内层目标的数据包）
 		globalGVisorStack.RegisterVXLANConnection(
 			raddr.IP,
 			uint16(raddr.Port),
-			vxlanConfig,
 		)
 
 		log.Printf("[INFO] VXLAN UDP connection: VNI %d, Inner %s:%d -> %s:%d, Outer %s -> %s",

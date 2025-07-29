@@ -10,8 +10,8 @@ import (
 type Option func(*options)
 
 type options struct {
-	vxlanConfig *VXLANConfig
-	localAddr   net.Addr // 本地地址
+	useVXLAN  bool     // 是否使用VXLAN（使用全局配置）
+	localAddr net.Addr // 本地地址
 	// 可扩展更多参数
 }
 
@@ -19,10 +19,9 @@ func setDefaultOption() *options {
 	return &options{}
 }
 
-// WithVXLAN 设置 VXLAN 配置
-func WithVXLAN(cfg *VXLANConfig) Option {
+func WithVXLAN() Option {
 	return func(o *options) {
-		o.vxlanConfig = cfg
+		o.useVXLAN = true
 	}
 }
 
@@ -39,7 +38,7 @@ func Dial(network, address string, opts ...Option) (net.Conn, error) {
 	for _, opt := range opts {
 		opt(o)
 	}
-	vxlanConfig := o.vxlanConfig
+	useVXLAN := o.useVXLAN
 	localAddr := o.localAddr
 
 	switch network {
@@ -56,8 +55,8 @@ func Dial(network, address string, opts ...Option) (net.Conn, error) {
 			}
 		}
 
-		if vxlanConfig != nil {
-			return DialTCPWithVXLAN(network, laddr, addr, vxlanConfig)
+		if useVXLAN {
+			return DialTCPWithVXLAN(network, laddr, addr)
 		}
 		return DialTCP(network, laddr, addr)
 	case "udp", "udp4", "udp6":
@@ -72,9 +71,9 @@ func Dial(network, address string, opts ...Option) (net.Conn, error) {
 				laddr = udpAddr
 			}
 		}
-
-		if vxlanConfig != nil {
-			return DialUDPWithVXLAN(network, laddr, addr, vxlanConfig)
+		// 检查是否应该使用VXLAN但没有配置
+		if useVXLAN {
+			return DialUDPWithVXLAN(network, laddr, addr)
 		}
 		return DialUDP(network, laddr, addr)
 	case "icmp", "icmp4", "icmp6":
@@ -82,7 +81,7 @@ func Dial(network, address string, opts ...Option) (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		conn, err := DialICMPWithVXLAN(addr, vxlanConfig)
+		conn, err := DialICMPWithVXLAN(addr)
 		if err != nil {
 			return nil, err
 		}
@@ -90,11 +89,6 @@ func Dial(network, address string, opts ...Option) (net.Conn, error) {
 	default:
 		return nil, errors.New("unsupported network type: " + network)
 	}
-}
-
-// DialWithVXLAN 辅助方法，显式传递 VXLAN 配置。
-func DialWithVXLAN(network, address string, vxlanConfig *VXLANConfig) (net.Conn, error) {
-	return Dial(network, address, WithVXLAN(vxlanConfig))
 }
 
 // DialTimeout acts like Dial but takes a timeout.
@@ -184,13 +178,8 @@ func DialUDP(network string, laddr, raddr *UDPAddr) (*UDPConn, error) {
 }
 
 // DialICMPWithVXLAN creates an ICMP connection with optional VXLAN encapsulation.
-func DialICMPWithVXLAN(raddr *net.IPAddr, vxlanConfig *VXLANConfig) (*ICMPConn, error) {
+func DialICMPWithVXLAN(raddr *net.IPAddr) (*ICMPConn, error) {
 	var localIP net.IP
-	if vxlanConfig != nil {
-		localIP = vxlanConfig.LocalIP
-	} else {
-		localIP = getLocalIPFromEnv()
-	}
-
-	return NewICMPConnWithVXLAN(localIP, vxlanConfig)
+	localIP = getLocalIPFromEnv()
+	return NewICMPConnWithVXLAN(localIP, GetGlobalVXLANConfig())
 }

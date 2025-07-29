@@ -11,7 +11,7 @@ func Listen(network, address string, opts ...Option) (net.Listener, error) {
 	for _, opt := range opts {
 		opt(o)
 	}
-	vxlanConfig := o.vxlanConfig
+	useVXLAN := o.useVXLAN
 
 	switch network {
 	case "tcp", "tcp4", "tcp6":
@@ -19,18 +19,13 @@ func Listen(network, address string, opts ...Option) (net.Listener, error) {
 		if err != nil {
 			return nil, err
 		}
-		if vxlanConfig != nil {
-			return ListenTCPWithVXLAN(network, addr, vxlanConfig)
+		if useVXLAN {
+			return ListenTCPWithVXLAN(network, addr)
 		}
 		return ListenTCP(network, addr)
 	default:
 		return nil, errors.New("unsupported network type: " + network)
 	}
-}
-
-// ListenWithVXLAN 辅助方法，显式传递 VXLAN 配置。
-func ListenWithVXLAN(network, address string, vxlanConfig *VXLANConfig) (net.Listener, error) {
-	return Listen(network, address, WithVXLAN(vxlanConfig))
 }
 
 // ListenPacket announces on the local network address with Option 风格。
@@ -39,7 +34,7 @@ func ListenPacket(network, address string, opts ...Option) (net.PacketConn, erro
 	for _, opt := range opts {
 		opt(o)
 	}
-	vxlanConfig := o.vxlanConfig
+	useVXLAN := o.useVXLAN
 
 	switch network {
 	case "udp", "udp4", "udp6":
@@ -47,8 +42,8 @@ func ListenPacket(network, address string, opts ...Option) (net.PacketConn, erro
 		if err != nil {
 			return nil, err
 		}
-		if vxlanConfig != nil {
-			return ListenUDPWithVXLAN(network, addr, vxlanConfig)
+		if useVXLAN {
+			return ListenUDPWithVXLAN(network, addr)
 		}
 		return ListenUDP(network, addr)
 	case "icmp", "icmp4", "icmp6":
@@ -56,13 +51,8 @@ func ListenPacket(network, address string, opts ...Option) (net.PacketConn, erro
 		if err != nil {
 			return nil, err
 		}
-		return NewICMPListenerWithVXLAN(addr, vxlanConfig)
+		return NewICMPListenerWithVXLAN(addr)
 	default:
 		return nil, errors.New("unsupported network type: " + network)
 	}
-}
-
-// ListenPacketWithVXLAN 辅助方法，显式传递 VXLAN 配置。
-func ListenPacketWithVXLAN(network, address string, vxlanConfig *VXLANConfig) (net.PacketConn, error) {
-	return ListenPacket(network, address, WithVXLAN(vxlanConfig))
 }

@@ -13,14 +13,16 @@ import (
 )
 
 var (
-	globalNetworkOnce sync.Once
-	globalNetworkInit bool
-	globalNetworkErr  error
-	globalTxFlow      *flow.Flow
-	globalSendCh      chan *packet.Packet
-	globalBytesCh     chan []byte                                       // 高性能字节发送通道
-	icmpHandlers      map[string]func([]byte, int, int, net.IP, net.IP) // ICMP处理器
-	localMAC          [6]uint8                                          // 本地网卡 MAC 地址
+	globalNetworkOnce  sync.Once
+	globalNetworkInit  bool
+	globalNetworkErr   error
+	globalTxFlow       *flow.Flow
+	globalSendCh       chan *packet.Packet
+	globalBytesCh      chan []byte                                       // 高性能字节发送通道
+	icmpHandlers       map[string]func([]byte, int, int, net.IP, net.IP) // ICMP处理器
+	localMAC           [6]uint8                                          // 本地网卡 MAC 地址
+	globalVXLANConfig  *VXLANConfig                                      // 全局 VXLAN 配置
+	globalVXLANHandler *VXLANHandler                                     // 全局 VXLAN 处理器
 )
 
 func init() {
@@ -191,6 +193,11 @@ func initializeVXLANNetworkStack() error {
 	vxlanConfig.SetGateway(gatewayIP, gatewayMAC)
 	log.Printf("[VXLAN] 已将网关信息设置到VXLAN配置中")
 
+	// 保存为全局VXLAN配置
+	globalVXLANConfig = vxlanConfig
+	globalVXLANHandler = NewVXLANHandler(vxlanConfig)
+	log.Printf("[VXLAN] 全局VXLAN配置和处理器已设置")
+
 	// 创建 ARP 处理器
 	arpHandler := NewARPHandler(vxlanIP, vxlanConfig.LocalMAC, vxlanConfig)
 
@@ -213,6 +220,21 @@ func initializeVXLANNetworkStack() error {
 		vxlanConfig.LocalIP, vxlanConfig.RemoteIP, vxlanConfig.VNI)
 
 	return nil
+}
+
+// GetGlobalVXLANConfig 获取全局VXLAN配置
+func GetGlobalVXLANConfig() *VXLANConfig {
+	return globalVXLANConfig
+}
+
+// GetGlobalVXLANHandler 获取全局VXLAN处理器
+func GetGlobalVXLANHandler() *VXLANHandler {
+	return globalVXLANHandler
+}
+
+// IsVXLANEnabled 检查是否启用了VXLAN
+func IsVXLANEnabled() bool {
+	return globalVXLANConfig != nil && globalVXLANHandler != nil
 }
 
 // globalPacketHandler 全局包处理器，优先通过 gVisor netstack 处理

@@ -60,27 +60,24 @@ func ListenTCP(network string, laddr *TCPAddr) (*TCPListener, error) {
 }
 
 // ListenTCPWithVXLAN 创建带 VXLAN 封装的 TCP 监听器
-func ListenTCPWithVXLAN(network string, laddr *TCPAddr, vxlanConfig *VXLANConfig) (*TCPListener, error) {
+func ListenTCPWithVXLAN(network string, laddr *TCPAddr) (*TCPListener, error) {
 	listener, err := ListenTCP(network, laddr)
 	if err != nil {
 		return nil, err
 	}
 
-	if vxlanConfig != nil {
-		listener.vxlanConfig = vxlanConfig
-		listener.vxlanHandler = NewVXLANHandler(vxlanConfig)
+	listener.vxlanConfig = GetGlobalVXLANConfig()
+	listener.vxlanHandler = GetGlobalVXLANHandler()
 
-		// 在全局网络栈中注册这个 VXLAN 连接
-		if globalGVisorStack != nil {
-			globalGVisorStack.RegisterVXLANConnection(
-				net.ParseIP("0.0.0.0"), // 监听所有接口
-				uint16(laddr.Port),
-				vxlanConfig,
-			)
-		}
-
-		log.Printf("[INFO] TCP listener enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
+	// 在全局网络栈中注册这个 VXLAN 连接
+	if globalGVisorStack != nil {
+		globalGVisorStack.RegisterVXLANConnection(
+			net.ParseIP("0.0.0.0"), // 监听所有接口
+			uint16(laddr.Port),
+		)
 	}
+
+	log.Printf("[INFO] TCP listener enabled VXLAN encapsulation with VNI %d", GetGlobalVXLANConfig().VNI)
 
 	return listener, nil
 }
@@ -214,11 +211,9 @@ func DialTCP(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 }
 
 // DialTCPWithVXLAN 创建带 VXLAN 封装的 TCP 连接
-func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr, vxlanConfig *VXLANConfig) (*TCPConn, error) {
-	if vxlanConfig == nil {
-		// 如果没有 VXLAN 配置，回退到普通 TCP
-		return DialTCP(network, laddr, raddr)
-	}
+// 如果 vxlanConfig 为 nil，则使用全局VXLAN配置
+func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
+	vxlanConfig := GetGlobalVXLANConfig()
 
 	// VXLAN 场景：raddr 是内层目标地址，实际的外层通信在 VTEP 之间进行
 	// 1. 创建本地 TCP 监听器，绑定到 VXLAN 本地地址
@@ -272,7 +267,12 @@ func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr, vxlanConfig *VXLANC
 
 	// 3. 配置 VXLAN
 	conn.vxlanConfig = vxlanConfig
-	conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
+	// 优先使用全局处理器，如果不存在则创建新的
+	if globalHandler := GetGlobalVXLANHandler(); globalHandler != nil {
+		conn.vxlanHandler = globalHandler
+	} else {
+		conn.vxlanHandler = NewVXLANHandler(vxlanConfig)
+	}
 
 	// 4. 注册 VXLAN 连接
 	if globalGVisorStack != nil {
@@ -283,7 +283,6 @@ func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr, vxlanConfig *VXLANC
 		globalGVisorStack.RegisterVXLANConnection(
 			vxlanConfig.LocalIP,
 			localPort,
-			vxlanConfig,
 		)
 		log.Printf("[INFO] Registered VXLAN connection for outbound TCP: local=%s:%d, VNI=%d",
 			vxlanConfig.LocalIP, localPort, vxlanConfig.VNI)

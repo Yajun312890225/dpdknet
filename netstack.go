@@ -204,12 +204,12 @@ func (gvs *GVisorNetstack) InjectDPDKPacket(data []byte) {
 }
 
 // RegisterVXLANConnection 注册 VXLAN 连接配置
-func (gvs *GVisorNetstack) RegisterVXLANConnection(localIP net.IP, localPort uint16, config *VXLANConfig) {
+func (gvs *GVisorNetstack) RegisterVXLANConnection(localIP net.IP, localPort uint16) {
 	gvs.vxlanMutex.Lock()
 	defer gvs.vxlanMutex.Unlock()
 
 	key := fmt.Sprintf("%s:%d", localIP.String(), localPort)
-	gvs.vxlanConnections[key] = config
+	gvs.vxlanConnections[key] = GetGlobalVXLANConfig()
 }
 
 // UnregisterVXLANConnection 取消注册 VXLAN 连接配置
