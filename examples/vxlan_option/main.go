@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Yajun312890225/dpdknet"
@@ -398,6 +403,24 @@ func getRemoteMACFromARP(remoteIP string) net.HardwareAddr {
 func tcpClientExample() {
 	fmt.Println("\n=== TCP Client with Global VXLAN Example ===")
 
+	// 设置信号处理
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 监听系统信号
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// 用于协调goroutine退出
+	var wg sync.WaitGroup
+
+	// 启动信号处理goroutine
+	go func() {
+		sig := <-sigChan
+		fmt.Printf("\n[INFO] 接收到信号 %v，开始优雅退出...\n", sig)
+		cancel()
+	}()
+
 	// 确保在创建连接前先初始化网络系统（这会使用新的环境变量并配置VXLAN）
 	if err := dpdknet.EnsureGlobalNetworkInit(); err != nil {
 		log.Fatalf("网络初始化失败: %v", err)
@@ -413,50 +436,108 @@ func tcpClientExample() {
 	targetAddr := "124.221.130.129:8080"
 
 	// 建立TCP连接
+	fmt.Println("[INFO] 正在建立TCP连接...")
 	conn, err := dpdknet.Dial("tcp", targetAddr,
 		dpdknet.WithLocalAddr(innerLocalAddr),
 		dpdknet.WithVXLAN())
 	if err != nil {
 		log.Fatalf("Failed to dial TCP with VXLAN: %v", err)
 	}
+	fmt.Printf("[INFO] ✅ TCP连接已建立: %s -> %s\n", conn.LocalAddr(), conn.RemoteAddr())
 
-	// 添加详细的连接关闭日志
+	// 连接关闭处理
 	defer func() {
+		fmt.Println("[INFO] 正在关闭连接...")
 		_ = conn.Close()
 		// 等待一下，让网络包处理完成
 		time.Sleep(time.Millisecond * 100)
-		log.Printf("[CLIENT] 🔚 Connection closure process finished")
+		fmt.Println("[INFO] 🔚 连接已关闭")
 	}()
 
-	// 发送数据
-	fmt.Println("\n[DEBUG] 开始发送测试数据...")
-	message := "Hello from TCP Client with VXLAN Debug"
+	// 启动写入goroutine
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+		message := "Hello from TCP Client with VXLAN"
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
 		for {
-			_, err = conn.Write([]byte(message))
-			if err != nil {
-				log.Printf("Write error: %v", err)
+			select {
+			case <-ctx.Done():
+				fmt.Println("[INFO] 停止发送数据...")
 				return
+			case <-ticker.C:
+				_, err := conn.Write([]byte(message))
+				if err != nil {
+					fmt.Printf("[ERROR] Write error: %v\n", err)
+					return
+				}
+				fmt.Printf("[CLIENT] 📤 发送数据: %s\n", message)
 			}
-			time.Sleep(500 * time.Millisecond)
 		}
 	}()
 
-	if err != nil {
-		return
-	}
+	// 启动读取goroutine
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buffer := make([]byte, 1024)
 
-	// 尝试读取响应
-	buffer := make([]byte, 1024)
+		for {
+			select {
+			case <-ctx.Done():
+				fmt.Println("[INFO] 停止读取数据...")
+				return
+			default:
+				// 设置读取超时
+				conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+				n, err := conn.Read(buffer)
+				if err != nil {
+					// 检查是否是超时错误
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						continue // 超时继续尝试
+					}
+					fmt.Printf("[ERROR] Read error: %v\n", err)
+					cancel() // 触发退出
+					return
+				}
 
-	for {
-		n, err := conn.Read(buffer)
-		if err != nil {
-			return
+				// 清除读取超时
+				conn.SetReadDeadline(time.Time{})
+				fmt.Printf("[CLIENT] 📨 接收数据: %s\n", string(buffer[:n]))
+			}
 		}
-		log.Printf("[CLIENT] 📨 Received data from %s: %s", conn.RemoteAddr(), string(buffer[:n]))
+	}()
+
+	// 等待退出信号或最大运行时间
+	timeout := time.NewTimer(30 * time.Second)
+	defer timeout.Stop()
+
+	select {
+	case <-ctx.Done():
+		fmt.Println("[INFO] 接收到退出信号，正在停止...")
+	case <-timeout.C:
+		fmt.Println("[INFO] 达到最大运行时间，正在停止...")
+		cancel()
 	}
 
+	// 等待所有goroutine结束
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	// 等待goroutine结束或强制退出
+	select {
+	case <-done:
+		fmt.Println("[INFO] ✅ 所有任务已完成")
+	case <-time.After(5 * time.Second):
+		fmt.Println("[WARN] ⚠️ 强制退出，某些任务可能未完成")
+	}
+
+	fmt.Println("[INFO] 🎯 TCP客户端已优雅退出")
 }
 
 // 分析连接错误的详细信息
