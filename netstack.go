@@ -430,7 +430,6 @@ func (gvs *GVisorNetstack) sendPacketToDPDK(pkt *stack.PacketBuffer) {
 // checkNeedVXLANEncapsulation 检查数据包是否需要 VXLAN 封装
 func (gvs *GVisorNetstack) checkNeedVXLANEncapsulation(ipPacket []byte) *VXLANConfig {
 	if len(ipPacket) < 20 {
-		log.Printf("[VXLAN_CHECK_DEBUG] IP packet too short for VXLAN check: %d bytes", len(ipPacket))
 		return nil // IP 包太短
 	}
 
@@ -439,66 +438,51 @@ func (gvs *GVisorNetstack) checkNeedVXLANEncapsulation(ipPacket []byte) *VXLANCo
 	srcIP := net.IP(ipPacket[12:16])
 	dstIP := net.IP(ipPacket[16:20])
 
-	log.Printf("[VXLAN_CHECK_DEBUG] Checking packet: %s -> %s, protocol: %d", srcIP, dstIP, protocol)
-
 	var srcPort, dstPort uint16
 
 	// 根据协议提取端口信息
 	switch protocol {
 	case 6: // TCP
 		if len(ipPacket) < 24 {
-			log.Printf("[VXLAN_CHECK_DEBUG] TCP packet too short for port extraction: %d bytes", len(ipPacket))
 			return nil
 		}
 		ipHeaderLen := (ipPacket[0] & 0x0F) * 4
 		if len(ipPacket) < int(ipHeaderLen)+4 {
-			log.Printf("[VXLAN_CHECK_DEBUG] TCP packet too short for port data: %d bytes, need %d", len(ipPacket), int(ipHeaderLen)+4)
 			return nil
 		}
 		srcPort = uint16(ipPacket[ipHeaderLen])<<8 | uint16(ipPacket[ipHeaderLen+1])
 		dstPort = uint16(ipPacket[ipHeaderLen+2])<<8 | uint16(ipPacket[ipHeaderLen+3])
-		log.Printf("[VXLAN_CHECK_DEBUG] TCP ports: %d -> %d", srcPort, dstPort)
 
 	case 17: // UDP
 		if len(ipPacket) < 28 {
-			log.Printf("[VXLAN_CHECK_DEBUG] UDP packet too short for port extraction: %d bytes", len(ipPacket))
 			return nil
 		}
 		ipHeaderLen := (ipPacket[0] & 0x0F) * 4
 		if len(ipPacket) < int(ipHeaderLen)+4 {
-			log.Printf("[VXLAN_CHECK_DEBUG] UDP packet too short for port data: %d bytes, need %d", len(ipPacket), int(ipHeaderLen)+4)
 			return nil
 		}
 		srcPort = uint16(ipPacket[ipHeaderLen])<<8 | uint16(ipPacket[ipHeaderLen+1])
 		dstPort = uint16(ipPacket[ipHeaderLen+2])<<8 | uint16(ipPacket[ipHeaderLen+3])
-		log.Printf("[VXLAN_CHECK_DEBUG] UDP ports: %d -> %d", srcPort, dstPort)
 
 	case 1: // ICMP
 		// ICMP 没有端口概念，使用特殊端口号 0
 		srcPort = 0
 		dstPort = 0
-		log.Printf("[VXLAN_CHECK_DEBUG] ICMP packet (no ports)")
 
 	default:
-		log.Printf("[VXLAN_CHECK_DEBUG] Unsupported protocol for VXLAN: %d", protocol)
 		return nil // 其他协议暂不支持
 	}
 
 	// 检查源端口是否注册了 VXLAN 配置
-	log.Printf("[VXLAN_CHECK_DEBUG] Checking VXLAN registration for srcIP:srcPort %s:%d", srcIP, srcPort)
 	if config := gvs.FindVXLANConfig(srcIP, srcPort); config != nil {
-		log.Printf("[VXLAN_CHECK_DEBUG] ✅ Found VXLAN config for src %s:%d, VNI: %d", srcIP, srcPort, config.VNI)
 		return config
 	}
 
 	// 检查目标端口是否注册了 VXLAN 配置
-	log.Printf("[VXLAN_CHECK_DEBUG] Checking VXLAN registration for dstIP:dstPort %s:%d", dstIP, dstPort)
 	if config := gvs.FindVXLANConfig(dstIP, dstPort); config != nil {
-		log.Printf("[VXLAN_CHECK_DEBUG] ✅ Found VXLAN config for dst %s:%d, VNI: %d", dstIP, dstPort, config.VNI)
 		return config
 	}
 
-	log.Printf("[VXLAN_CHECK_DEBUG] No VXLAN config found for this packet")
 	return nil
 }
 
@@ -637,20 +621,15 @@ func (gvs *GVisorNetstack) CreateUDPConnWithLocalAddr(localIP net.IP, port uint1
 
 // ensureIPAddressConfigured 确保指定的IP地址在gVisor网络栈中已配置
 func (gvs *GVisorNetstack) ensureIPAddressConfigured(ip net.IP) error {
-	log.Printf("[GVISOR_IP_DEBUG] ensureIPAddressConfigured called for IP: %s", ip)
 
 	// 检查IP是否已经配置
-	log.Printf("[GVISOR_IP_DEBUG] Checking if IP %s is already configured...", ip)
 	addrs := gvs.stack.AllAddresses()
 	for nicID, nicAddrs := range addrs {
-		log.Printf("[GVISOR_IP_DEBUG] Checking NIC %d with %d addresses", nicID, len(nicAddrs))
 		if nicID == defaultNICID {
-			for i, addr := range nicAddrs {
+			for _, addr := range nicAddrs {
 				existingIP := addr.AddressWithPrefix.Address
-				log.Printf("[GVISOR_IP_DEBUG] Existing address %d: %s (target: %s)", i, existingIP, tcpip.AddrFromSlice(ip.To4()))
 				if existingIP == tcpip.AddrFromSlice(ip.To4()) {
 					// IP已经配置，直接返回
-					log.Printf("[GVISOR_IP_DEBUG] ✅ IP %s is already configured on NIC %d", ip, nicID)
 					return nil
 				}
 			}
@@ -658,7 +637,6 @@ func (gvs *GVisorNetstack) ensureIPAddressConfigured(ip net.IP) error {
 	}
 
 	// IP未配置，添加为辅助地址
-	log.Printf("[GVISOR_IP_DEBUG] IP %s not found, adding as secondary address...", ip)
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol: ipv4.ProtocolNumber,
 		AddressWithPrefix: tcpip.AddressWithPrefix{
@@ -667,17 +645,9 @@ func (gvs *GVisorNetstack) ensureIPAddressConfigured(ip net.IP) error {
 		},
 	}
 
-	log.Printf("[GVISOR_IP_DEBUG] Adding protocol address: %s/%d on NIC %d", protocolAddr.AddressWithPrefix.Address, protocolAddr.AddressWithPrefix.PrefixLen, defaultNICID)
-
 	if tcpErr := gvs.stack.AddProtocolAddress(defaultNICID, protocolAddr, stack.AddressProperties{}); tcpErr != nil {
-		log.Printf("[GVISOR_IP_ERROR] Failed to add IP address %s: %v", ip, tcpErr)
 		return fmt.Errorf("failed to add IP address %s: %v", ip, tcpErr)
 	}
-
-	log.Printf("[GVISOR_IP_DEBUG] ✅ Successfully added IP %s to gVisor stack", ip)
-
-	// 为新添加的IP地址添加更具体的路由
-	log.Printf("[GVISOR_IP_DEBUG] Adding route for new IP %s...", ip)
 
 	// 计算正确的子网地址（网络地址）
 	ipv4 := ip.To4()
@@ -691,8 +661,6 @@ func (gvs *GVisorNetstack) ensureIPAddressConfigured(ip net.IP) error {
 			networkAddr[i] = ipv4[i] & mask[i]
 		}
 
-		log.Printf("[GVISOR_IP_DEBUG] Calculated network address: %s for IP %s", networkAddr, ip)
-
 		ipSubnet, err := tcpip.NewSubnet(
 			tcpip.AddrFromSlice(networkAddr),
 			tcpip.MaskFromBytes([]byte{255, 255, 255, 0}), // /24 子网掩码
@@ -702,14 +670,12 @@ func (gvs *GVisorNetstack) ensureIPAddressConfigured(ip net.IP) error {
 		} else {
 			// 获取当前路由表
 			currentRoutes := gvs.stack.GetRouteTable()
-			log.Printf("[GVISOR_IP_DEBUG] Current route table has %d entries", len(currentRoutes))
 
 			// 检查是否已存在此路由
 			routeExists := false
 			for _, route := range currentRoutes {
 				if route.Destination == ipSubnet && route.NIC == defaultNICID {
 					routeExists = true
-					log.Printf("[GVISOR_IP_DEBUG] Route for network %s already exists", networkAddr)
 					break
 				}
 			}
@@ -722,7 +688,6 @@ func (gvs *GVisorNetstack) ensureIPAddressConfigured(ip net.IP) error {
 				}
 				updatedRoutes := append(currentRoutes, newRoute)
 				gvs.stack.SetRouteTable(updatedRoutes)
-				log.Printf("[GVISOR_IP_DEBUG] ✅ Added route for network %s/24 to NIC %d", networkAddr, defaultNICID)
 			}
 		}
 	}
@@ -774,66 +739,40 @@ func (gvs *GVisorNetstack) CreateTCPConnWithTimeout(localAddr, remoteAddr *net.T
 
 // CreateTCPConnWithLocalAddr 创建指定本地地址的 TCP 连接
 func (gvs *GVisorNetstack) CreateTCPConnWithLocalAddr(localIP net.IP, localPort uint16, remoteAddr *net.TCPAddr) (net.Conn, error) {
-	log.Printf("[GVISOR_TCP_DEBUG] CreateTCPConnWithLocalAddr called: localIP=%s, localPort=%d, remoteAddr=%s", localIP, localPort, remoteAddr)
 
 	// 检查本地IP是否已经在网络栈中配置
-	log.Printf("[GVISOR_TCP_DEBUG] Ensuring local IP %s is configured in gVisor stack...", localIP)
 	err := gvs.ensureIPAddressConfigured(localIP)
 	if err != nil {
-		log.Printf("[GVISOR_TCP_ERROR] Failed to configure local IP %s: %v", localIP, err)
 		return nil, fmt.Errorf("failed to configure local IP %s: %v", localIP, err)
 	}
-	log.Printf("[GVISOR_TCP_DEBUG] ✅ Local IP %s configured successfully", localIP)
 
 	localFullAddr := tcpip.FullAddress{
 		NIC:  defaultNICID,
 		Addr: tcpip.AddrFromSlice(localIP.To4()),
 		Port: localPort,
 	}
-	log.Printf("[GVISOR_TCP_DEBUG] Local full address: NIC=%d, Addr=%s, Port=%d", localFullAddr.NIC, localFullAddr.Addr, localFullAddr.Port)
 
 	remoteFullAddr := tcpip.FullAddress{
 		NIC:  defaultNICID,
 		Addr: tcpip.AddrFromSlice(remoteAddr.IP.To4()),
 		Port: uint16(remoteAddr.Port),
 	}
-	log.Printf("[GVISOR_TCP_DEBUG] Remote full address: NIC=%d, Addr=%s, Port=%d", remoteFullAddr.NIC, remoteFullAddr.Addr, remoteFullAddr.Port)
 
 	// 检查到目标地址的路由可达性
-	log.Printf("[GVISOR_TCP_DEBUG] Checking route to remote address %s...", remoteAddr.IP)
 	route, tcpErr := gvs.stack.FindRoute(defaultNICID, tcpip.AddrFromSlice(localIP.To4()), tcpip.AddrFromSlice(remoteAddr.IP.To4()), ipv4.ProtocolNumber, false)
 	if tcpErr != nil {
-		log.Printf("[GVISOR_TCP_WARNING] No route to destination %s: %v", remoteAddr.IP, tcpErr)
-		log.Printf("[GVISOR_TCP_DEBUG] This might cause connection failures")
 	} else {
-		log.Printf("[GVISOR_TCP_DEBUG] ✅ Route found to %s via NIC %d", remoteAddr.IP, route.NICID())
 		route.Release()
 	}
 
-	log.Printf("[GVISOR_TCP_DEBUG] Calling gonet.DialTCPWithBind...")
-	log.Printf("[GVISOR_TCP_DEBUG] Route table before connection attempt:")
-	routes := gvs.stack.GetRouteTable()
-	for i, route := range routes {
-		log.Printf("[GVISOR_TCP_DEBUG]   Route %d: %s -> NIC %d", i, route.Destination, route.NIC)
-	}
-
-	startTime := time.Now()
 	conn, err := gonet.DialTCPWithBind(context.Background(), gvs.stack, localFullAddr, remoteFullAddr, ipv4.ProtocolNumber)
-	dialDuration := time.Since(startTime)
-
 	if err != nil {
-		log.Printf("[GVISOR_TCP_ERROR] gonet.DialTCPWithBind failed after %v: %v", dialDuration, err)
-		log.Printf("[GVISOR_TCP_ERROR] This indicates an issue with the gVisor network stack or routing")
-		log.Printf("[GVISOR_TCP_DEBUG] Stack info: localIP=%s configured, routing table available", localIP)
 		return nil, fmt.Errorf("failed to create TCP connection with local addr %s:%d: %v", localIP, localPort, err)
 	}
-
-	log.Printf("[GVISOR_TCP_DEBUG] ✅ gonet.DialTCPWithBind succeeded in %v", dialDuration)
 
 	gvs.stats.TCPConnections++
 	gvs.stats.ActiveConnections++
 
-	log.Printf("[GVISOR_TCP_DEBUG] Connection established successfully: %s -> %s", conn.LocalAddr(), conn.RemoteAddr())
 	return conn, nil
 }
 
