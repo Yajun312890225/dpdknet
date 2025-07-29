@@ -104,7 +104,9 @@ func (config *VXLANConfig) GetDestinationMAC(dstIP net.IP) net.HardwareAddr {
 
 	// 同网段或直连的情况，从ARP缓存获取
 	return config.GetMACFromARP(dstIP)
-} // isPublicIP 检查IP是否为公网地址
+}
+
+// isPublicIP 检查IP是否为公网地址
 func isPublicIP(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -157,7 +159,9 @@ func isRemoteNetwork(ip net.IP) bool {
 
 	// 如果不是11.x.x.x网段，认为是远程网络
 	return ip4[0] != 11
-} // querySystemARP 查询系统ARP表获取MAC地址
+} 
+
+// querySystemARP 查询系统ARP表获取MAC地址
 func querySystemARP(ipStr string) net.HardwareAddr {
 	// 先尝试ping来触发ARP
 	exec.Command("ping", "-c", "1", "-W", "1", ipStr).Run()
