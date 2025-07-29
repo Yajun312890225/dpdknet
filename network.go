@@ -198,6 +198,15 @@ func initializeVXLANNetworkStack() error {
 	globalVXLANHandler = NewVXLANHandler(vxlanConfig)
 	log.Printf("[VXLAN] 全局VXLAN配置和处理器已设置")
 
+	// 确保全局网络栈监听VXLAN端口4789来接收外层VXLAN包
+	if globalGVisorStack != nil {
+		globalGVisorStack.RegisterVXLANConnection(
+			vxlanConfig.LocalIP,
+			vxlanConfig.UDPPort, // 4789端口
+		)
+		log.Printf("[VXLAN] 已注册VXLAN端口监听: %s:%d", vxlanConfig.LocalIP, vxlanConfig.UDPPort)
+	}
+
 	// 创建 ARP 处理器
 	arpHandler := NewARPHandler(vxlanIP, vxlanConfig.LocalMAC, vxlanConfig)
 
@@ -251,8 +260,20 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 		return
 	}
 
+	// 提取源IP和目标IP进行初步分析
+	if len(data) >= 30 { // 以太网头(14) + IP头最小(20)
+		srcIP := net.IP(data[26:30])
+		dstIP := net.IP(data[30:34])
+
+		// 记录来自远程VTEP的包
+		if srcIP.String() == "192.168.66.29" {
+			log.Printf("[RX] Packet from remote VTEP: %s -> %s, Length: %d", srcIP, dstIP, len(data))
+		}
+	}
+
 	// 检查是否为 VXLAN 包
 	if IsVXLANPacket(data) {
+		log.Printf("[VXLAN-RX] Detected VXLAN packet, Length: %d", len(data))
 		// 先提取 VXLAN 内层数据
 		innerData := extractVXLANPayload(data)
 		if innerData != nil {

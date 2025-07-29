@@ -56,8 +56,10 @@ func main() {
 	// 服务器主循环
 	go func() {
 		buffer := make([]byte, 4096)
+		log.Printf("[DEBUG] UDP server main loop started, waiting for packets...")
 
 		for {
+			log.Printf("[DEBUG] Calling ReadFromUDP...")
 			// 读取UDP数据包
 			n, clientAddr, err := conn.ReadFromUDP(buffer)
 			if err != nil {
@@ -65,13 +67,16 @@ func main() {
 				continue
 			}
 
+			log.Printf("[DEBUG] ReadFromUDP returned: n=%d, clientAddr=%v", n, clientAddr)
+
 			if n == 0 {
+				log.Printf("[DEBUG] Received 0 bytes, continuing...")
 				continue
 			}
 
 			data := buffer[:n]
-			// log.Printf("[INFO] Received %d bytes from %s: %s",
-			// n, clientAddr.String(), string(data))
+			log.Printf("[INFO] Received %d bytes from %s: %s",
+				n, clientAddr.String(), string(data))
 
 			// 处理数据包
 			handleUDPPacket(conn, clientAddr, data)
@@ -89,6 +94,7 @@ func main() {
 
 func handleUDPPacket(conn *dpdknet.UDPConn, clientAddr *dpdknet.UDPAddr, data []byte) {
 	message := string(data)
+	log.Printf("[DEBUG] Handling packet from %s: %s", clientAddr.String(), message)
 
 	// 生成响应
 	var response string
@@ -103,6 +109,7 @@ func handleUDPPacket(conn *dpdknet.UDPConn, clientAddr *dpdknet.UDPAddr, data []
 		response = fmt.Sprintf("Echo: %s", message)
 	}
 
+	log.Printf("[DEBUG] Sending response: %s", response)
 	// 发送响应
 	_, err := conn.WriteToUDP([]byte(response), clientAddr)
 	if err != nil {
@@ -110,10 +117,10 @@ func handleUDPPacket(conn *dpdknet.UDPConn, clientAddr *dpdknet.UDPAddr, data []
 		return
 	}
 
-	// log.Printf("[INFO] Sent response to %s: %s", clientAddr.String(), response)
+	log.Printf("[INFO] Sent response to %s: %s", clientAddr.String(), response)
 
 	// 统计信息
-	// logPacketStats(clientAddr, len(data), len(response))
+	logPacketStats(clientAddr, len(data), len(response))
 }
 
 func logPacketStats(clientAddr *dpdknet.UDPAddr, receivedBytes, sentBytes int) {

@@ -113,7 +113,7 @@ func udpClientExample() {
 		log.Fatalf("Failed to resolve inner local address: %v", err)
 	}
 
-	conn, err := dpdknet.Dial("udp", "43.136.167.182:8000",
+	conn, err := dpdknet.Dial("udp", "124.221.130.129:8000",
 		dpdknet.WithLocalAddr(innerLocalAddr),
 		dpdknet.WithVXLAN())
 	if err != nil {
@@ -134,20 +134,31 @@ func udpClientExample() {
 	fmt.Printf("    本地 VTEP: %s (MAC: %s)\n", globalConfig.LocalIP, globalConfig.LocalMAC)
 	fmt.Printf("    远程 VTEP: %s (MAC: %s)\n", globalConfig.RemoteIP, globalConfig.RemoteMAC)
 	fmt.Printf("    VNI: %d, UDP 端口: %d\n", globalConfig.VNI, globalConfig.UDPPort)
-	for {
+	go func() {
+		// 增加读的代码
+
 		_, err = conn.Write([]byte(message))
 		if err != nil {
 			log.Printf("Write error: %v", err)
 			return
 		}
-		time.Sleep(1 * time.Second) // 每秒发送一次
+
+		fmt.Printf("  ✅ 数据写入成功\n")
+
+		// 等待一段时间让数据包发送完成
+		time.Sleep(500 * time.Millisecond)
+		fmt.Println("8. 数据发送完成，完整的网络协议栈测试完成")
+	}()
+
+	buffer := make([]byte, 1024)
+	for {
+		n, err := conn.Read(buffer)
+		if err != nil {
+			log.Printf("Read error: %v", err)
+			return
+		}
+		fmt.Printf("Received UDP data: %s\n", string(buffer[:n]))
 	}
-
-	fmt.Printf("  ✅ 数据写入成功\n")
-
-	// 等待一段时间让数据包发送完成
-	time.Sleep(500 * time.Millisecond)
-	fmt.Println("8. 数据发送完成，完整的网络协议栈测试完成")
 }
 
 func handleTCPConnection(conn net.Conn) {

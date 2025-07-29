@@ -522,17 +522,22 @@ func (vh *VXLANHandler) GetConfig() *VXLANConfig {
 // -------------------- VXLAN 包处理入口 --------------------
 // handleIncomingVXLANPacket 处理传入的 VXLAN 包
 func handleIncomingVXLANPacket(data []byte) {
+	log.Printf("[VXLAN-RX] Processing incoming VXLAN packet, Length: %d", len(data))
+
 	// 检查是否为 VXLAN 包
 	if !IsVXLANPacket(data) {
+		log.Printf("[VXLAN-RX] Not a VXLAN packet")
 		return
 	}
 
 	// 先解析包获取实际的 VNI
 	actualVNI, err := extractVNIFromPacket(data)
 	if err != nil {
-		log.Printf("[DEBUG] Failed to extract VNI from VXLAN packet: %v", err)
+		log.Printf("[VXLAN-RX] Failed to extract VNI from VXLAN packet: %v", err)
 		return
 	}
+
+	log.Printf("[VXLAN-RX] Extracted VNI: %d", actualVNI)
 
 	// 创建对应 VNI 的处理器进行解封装
 	config := DefaultVXLANConfig()
@@ -541,12 +546,16 @@ func handleIncomingVXLANPacket(data []byte) {
 
 	innerPayload, innerSrcIP, innerDstIP, innerSrcPort, innerDstPort, protocol, vni, err := tmpHandler.DecapsulateVXLAN(data)
 	if err != nil {
-		log.Printf("[DEBUG] Failed to decapsulate VXLAN packet: %v", err)
+		log.Printf("[VXLAN-RX] Failed to decapsulate VXLAN packet: %v", err)
 		return
 	}
 
+	log.Printf("[VXLAN-RX] Successfully decapsulated - Inner: %s:%d -> %s:%d, Protocol: %d, VNI: %d",
+		innerSrcIP, innerSrcPort, innerDstIP, innerDstPort, protocol, vni)
+
 	// 检查是否为ARP包
 	if innerSrcIP == nil && innerDstIP == nil {
+		log.Printf("[VXLAN-RX] Detected ARP packet, injecting to gVisor")
 		// 这是ARP包，直接注入到gVisor
 		if gvisor := GetGVisorNetstack(); gvisor != nil {
 			gvisor.InjectDPDKPacket(innerPayload)
@@ -557,12 +566,42 @@ func handleIncomingVXLANPacket(data []byte) {
 	// 保存 VNI 映射信息，用于回程封装
 	saveVNIMapping(innerSrcIP, innerDstIP, vni)
 
-	// 构建内层 IP 包
-	innerIPPacket := constructInnerIPPacket(innerPayload, innerSrcIP, innerDstIP, innerSrcPort, innerDstPort, protocol)
+	log.Printf("[VXLAN-RX] Injecting decapsulated packet to gVisor, payload length: %d", len(innerPayload))
 
-	// 注入到 gVisor netstack 进行协议栈处理
+	// 直接注入原始的VXLAN内层数据到gVisor
+	// VXLAN解包已经返回了完整的内层以太网帧，不需要重新构建
 	if gvisor := GetGVisorNetstack(); gvisor != nil {
-		gvisor.InjectDPDKPacket(innerIPPacket)
+		// 从VXLAN包中提取完整的内层以太网帧
+		packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
+		vxlanLayer := packet.Layer(layers.LayerTypeVXLAN)
+		if vxlanLayer != nil {
+			vxlan := vxlanLayer.(*layers.VXLAN)
+			innerEthernetFrame := vxlan.LayerPayload() // 完整的内层以太网帧
+			log.Printf("[VXLAN-RX] Extracted inner ethernet frame, length: %d", len(innerEthernetFrame))
+
+			// 检查内层以太网帧的MAC地址
+			if len(innerEthernetFrame) >= 14 {
+				innerDstMAC := innerEthernetFrame[0:6]
+				innerSrcMAC := innerEthernetFrame[6:12]
+				log.Printf("[VXLAN-RX] Inner frame - DstMAC: %02x:%02x:%02x:%02x:%02x:%02x, SrcMAC: %02x:%02x:%02x:%02x:%02x:%02x",
+					innerDstMAC[0], innerDstMAC[1], innerDstMAC[2], innerDstMAC[3], innerDstMAC[4], innerDstMAC[5],
+					innerSrcMAC[0], innerSrcMAC[1], innerSrcMAC[2], innerSrcMAC[3], innerSrcMAC[4], innerSrcMAC[5])
+
+				// 修复目标MAC地址：将内层目标MAC替换为本地gVisor的MAC地址
+				localMAC := GetLocalMAC()
+				copy(innerEthernetFrame[0:6], localMAC)
+				log.Printf("[VXLAN-RX] Fixed inner frame DstMAC to local MAC: %s", localMAC)
+			}
+
+			gvisor.InjectDPDKPacket(innerEthernetFrame)
+		} else {
+			log.Printf("[VXLAN-RX] Failed to extract inner ethernet frame, fallback to constructed packet")
+			// 降级处理：构建内层IP包
+			innerIPPacket := constructInnerIPPacket(innerPayload, innerSrcIP, innerDstIP, innerSrcPort, innerDstPort, protocol)
+			if innerIPPacket != nil {
+				gvisor.InjectDPDKPacket(innerIPPacket)
+			}
+		}
 	}
 }
 

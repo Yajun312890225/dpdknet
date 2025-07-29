@@ -218,38 +218,35 @@ func (c *UDPConn) SetWriteDeadline(t time.Time) error {
 func DialUDPWithVXLAN(network string, laddr, raddr *UDPAddr) (*UDPConn, error) {
 	vxlanConfig := GetGlobalVXLANConfig()
 
-	// VXLAN 场景：raddr 是内层目标地址，实际的外层通信在 VTEP 之间进行
-	// 1. 创建本地 UDP 监听器，绑定到 VXLAN 本地地址
-	vxlanLocalAddr := &UDPAddr{
-		IP:   vxlanConfig.LocalIP, // 使用 VXLAN 本地 VTEP IP
-		Port: 0,                   // 让系统分配端口
-	}
-
-	// 如果用户指定了本地地址，使用用户指定的端口
-	if laddr != nil && laddr.Port != 0 {
-		vxlanLocalAddr.Port = laddr.Port
-	}
-
-	// 2. 创建 UDP 连接 - 在 VXLAN 场景下使用内层地址
+	// VXLAN 场景：raddr 是内层目标地址，gVisor 应该监听内层地址
+	// 1. gVisor 监听内层本地地址（应用层看到的地址）
 	var gvisorConn net.PacketConn
 	var actualLocalAddr *UDPAddr
+	var err error
 
 	if laddr != nil {
 		// 如果指定了内层本地地址，使用它创建 gVisor 连接
-		var err error
 		gvisorConn, err = CreateGVisorUDPConnWithLocalAddr(laddr.IP, uint16(laddr.Port))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gVisor UDP connection with local addr %s:%d: %v", laddr.IP, laddr.Port, err)
 		}
 		actualLocalAddr = laddr
 	} else {
-		// 否则使用外层 VTEP 地址
-		var err error
-		gvisorConn, err = CreateGVisorUDPConn(uint16(vxlanLocalAddr.Port))
+		// 如果没有指定内层地址，使用默认端口0让系统分配
+		gvisorConn, err = CreateGVisorUDPConn(0)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gVisor UDP connection: %v", err)
 		}
-		actualLocalAddr = vxlanLocalAddr
+		// 从gVisor连接获取实际分配的地址
+		if gvisorLocalAddr := gvisorConn.LocalAddr(); gvisorLocalAddr != nil {
+			if udpAddr, ok := gvisorLocalAddr.(*net.UDPAddr); ok {
+				actualLocalAddr = &UDPAddr{
+					IP:   udpAddr.IP,
+					Port: udpAddr.Port,
+					Zone: udpAddr.Zone,
+				}
+			}
+		}
 	}
 
 	conn := &UDPConn{
@@ -271,24 +268,13 @@ func DialUDPWithVXLAN(network string, laddr, raddr *UDPAddr) (*UDPConn, error) {
 
 	// 5. 注册 VXLAN 连接到全局网络栈
 	if globalGVisorStack != nil {
-		// 如果用户指定了内层本地地址，使用内层地址注册
-		var innerLocalIP net.IP
-		var innerLocalPort uint16
-
-		if laddr != nil {
-			innerLocalIP = laddr.IP
-			innerLocalPort = uint16(laddr.Port)
-		} else {
-			// 如果没有指定内层地址，使用外层 VTEP 地址
-			innerLocalIP = vxlanConfig.LocalIP
-			innerLocalPort = uint16(vxlanLocalAddr.Port)
+		// 注册内层本地地址，这样VXLAN解包后的数据可以路由到正确的gVisor连接
+		if actualLocalAddr != nil {
+			globalGVisorStack.RegisterVXLANConnection(
+				actualLocalAddr.IP,
+				uint16(actualLocalAddr.Port),
+			)
 		}
-
-		// 注册内层地址和端口到 VXLAN 配置
-		globalGVisorStack.RegisterVXLANConnection(
-			innerLocalIP,
-			innerLocalPort,
-		)
 
 		// 注册内层目标地址和端口（这样可以捕获到发往内层目标的数据包）
 		globalGVisorStack.RegisterVXLANConnection(
@@ -296,11 +282,20 @@ func DialUDPWithVXLAN(network string, laddr, raddr *UDPAddr) (*UDPConn, error) {
 			uint16(raddr.Port),
 		)
 
-		log.Printf("[INFO] VXLAN UDP connection: VNI %d, Inner %s:%d -> %s:%d, Outer %s -> %s",
+		// 如果用户指定了内层本地地址，也要注册它
+		if laddr != nil {
+			globalGVisorStack.RegisterVXLANConnection(
+				laddr.IP,
+				uint16(laddr.Port),
+			)
+		}
+
+		log.Printf("[INFO] VXLAN UDP connection: VNI %d, Inner %s:%d -> %s:%d, Outer %s:%d -> %s:%d",
 			vxlanConfig.VNI,
-			innerLocalIP, innerLocalPort,
+			actualLocalAddr.IP, actualLocalAddr.Port,
 			raddr.IP, raddr.Port,
-			vxlanConfig.LocalIP, vxlanConfig.RemoteIP)
+			vxlanConfig.LocalIP, vxlanConfig.UDPPort,
+			vxlanConfig.RemoteIP, vxlanConfig.UDPPort)
 	}
 
 	return conn, nil
