@@ -134,11 +134,13 @@ func udpClientExample() {
 	fmt.Printf("    本地 VTEP: %s (MAC: %s)\n", globalConfig.LocalIP, globalConfig.LocalMAC)
 	fmt.Printf("    远程 VTEP: %s (MAC: %s)\n", globalConfig.RemoteIP, globalConfig.RemoteMAC)
 	fmt.Printf("    VNI: %d, UDP 端口: %d\n", globalConfig.VNI, globalConfig.UDPPort)
-
-	_, err = conn.Write([]byte(message))
-	if err != nil {
-		log.Printf("Write error: %v", err)
-		return
+	for {
+		_, err = conn.Write([]byte(message))
+		if err != nil {
+			log.Printf("Write error: %v", err)
+			return
+		}
+		time.Sleep(1 * time.Second) // 每秒发送一次
 	}
 
 	fmt.Printf("  ✅ 数据写入成功\n")
