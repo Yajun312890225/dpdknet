@@ -318,6 +318,16 @@ func (ah *ARPHandler) GetARPTable() map[string]ARPEntry {
 	return ah.arpTable.entries
 }
 
+// GetLocalIP 获取本地IP地址
+func (ah *ARPHandler) GetLocalIP() net.IP {
+	return ah.localIP
+}
+
+// GetLocalMAC 获取本地MAC地址
+func (ah *ARPHandler) GetLocalMAC() net.HardwareAddr {
+	return ah.localMAC
+}
+
 // CreateARPClient 创建 ARP 客户端（用于直接网络接口操作）
 func (ah *ARPHandler) CreateARPClient(ifaceName string) error {
 	// 注意：这个方法需要根据实际的 arp 库 API 调整

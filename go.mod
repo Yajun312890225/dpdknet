@@ -8,6 +8,7 @@ require (
 	github.com/insomniacslk/dhcp v0.0.0-20250417080101-5f8cf70e8c5f
 	github.com/mdlayher/arp v0.0.0-20220512170110-6706a2966875
 	github.com/mdlayher/ethernet v0.0.0-20220221185849-529eae5b6118
+	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 	gvisor.dev/gvisor v0.0.0-20250205023644-9414b50a5633
 )
 

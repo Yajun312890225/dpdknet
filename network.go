@@ -181,9 +181,19 @@ func GetGlobalVXLANConfig() *VXLANConfig {
 	return globalVXLANConfig
 }
 
+// SetGlobalVXLANConfig 设置全局VXLAN配置
+func SetGlobalVXLANConfig(config *VXLANConfig) {
+	globalVXLANConfig = config
+}
+
 // GetGlobalVXLANHandler 获取全局VXLAN处理器
 func GetGlobalVXLANHandler() *VXLANHandler {
 	return globalVXLANHandler
+}
+
+// SetGlobalVXLANHandler 设置全局VXLAN处理器
+func SetGlobalVXLANHandler(handler *VXLANHandler) {
+	globalVXLANHandler = handler
 }
 
 // IsVXLANEnabled 检查是否启用了VXLAN
