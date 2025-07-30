@@ -25,20 +25,18 @@ type ARPEntry struct {
 
 // ARPHandler ARP 处理器
 type ARPHandler struct {
-	localIP     net.IP
-	localMAC    net.HardwareAddr
-	arpTable    *ARPTable
-	vxlanConfig *VXLANConfig
-	client      *arp.Client
+	localIP  net.IP
+	localMAC net.HardwareAddr
+	arpTable *ARPTable
+	client   *arp.Client
 }
 
 // NewARPHandler 创建新的 ARP 处理器
-func NewARPHandler(localIP net.IP, localMAC net.HardwareAddr, vxlanConfig *VXLANConfig) *ARPHandler {
+func NewARPHandler(localIP net.IP, localMAC net.HardwareAddr) *ARPHandler {
 	return &ARPHandler{
-		localIP:     localIP,
-		localMAC:    localMAC,
-		arpTable:    NewARPTable(),
-		vxlanConfig: vxlanConfig,
+		localIP:  localIP,
+		localMAC: localMAC,
+		arpTable: NewARPTable(),
 	}
 }
 
@@ -93,12 +91,22 @@ func (ah *ARPHandler) SendARPRequest(targetIP net.IP) error {
 
 	// 创建 ARP 请求包
 	arpRequest := &arp.Packet{
+		HardwareType:       1,      // 以太网
+		ProtocolType:       0x0800, // IPv4
+		HardwareAddrLength: 6,      // MAC地址长度
+		IPLength:           4,      // IPv4地址长度
 		Operation:          arp.OperationRequest,
 		SenderHardwareAddr: ah.localMAC,
 		SenderIP:           senderIPAddr,
 		TargetHardwareAddr: net.HardwareAddr{0, 0, 0, 0, 0, 0}, // 未知
 		TargetIP:           targetIPAddr,
 	}
+
+	// 调试信息：验证ARP请求包
+	log.Printf("[ARP] ARP请求包内容 - 操作: %d, 发送者IP: %s, 发送者MAC: %s, 目标IP: %s, 目标MAC: %s",
+		arpRequest.Operation,
+		arpRequest.SenderIP.String(), arpRequest.SenderHardwareAddr.String(),
+		arpRequest.TargetIP.String(), arpRequest.TargetHardwareAddr.String())
 
 	// 序列化 ARP 包
 	arpData, err := arpRequest.MarshalBinary()
@@ -112,7 +120,33 @@ func (ah *ARPHandler) SendARPRequest(targetIP net.IP) error {
 
 // SendARPReply 发送 ARP 回复
 func (ah *ARPHandler) SendARPReply(targetIP net.IP, targetMAC net.HardwareAddr) error {
-	log.Printf("[ARP] 发送ARP回复: %s -> %s", ah.localIP.String(), ah.localMAC.String())
+	return ah.SendARPReplyWithMode(targetIP, targetMAC, false)
+}
+
+// SendVXLANARPReply 发送 VXLAN ARP 回复
+func (ah *ARPHandler) SendVXLANARPReply(targetIP net.IP, targetMAC net.HardwareAddr) error {
+	return ah.SendARPReplyWithMode(targetIP, targetMAC, true)
+}
+
+// SendARPReplyWithMode 发送 ARP 回复（支持选择发送模式）
+func (ah *ARPHandler) SendARPReplyWithMode(targetIP net.IP, targetMAC net.HardwareAddr, isVXLAN bool) error {
+	if isVXLAN {
+		log.Printf("[ARP] 发送VXLAN ARP回复: %s -> %s", ah.localIP.String(), ah.localMAC.String())
+	} else {
+		log.Printf("[ARP] 发送普通ARP回复: %s -> %s", ah.localIP.String(), ah.localMAC.String())
+	}
+
+	// 调试信息：验证输入参数
+	log.Printf("[ARP] 构建ARP回复 - 本地IP: %s, 本地MAC: %s", ah.localIP.String(), ah.localMAC.String())
+	log.Printf("[ARP] 构建ARP回复 - 目标IP: %s, 目标MAC: %s", targetIP.String(), targetMAC.String())
+
+	// 验证IP地址不为空
+	if ah.localIP == nil {
+		return fmt.Errorf("本地IP地址为空")
+	}
+	if targetIP == nil {
+		return fmt.Errorf("目标IP地址为空")
+	}
 
 	// 转换IP地址为netip.Addr
 	senderIPAddr, err := netip.ParseAddr(ah.localIP.String())
@@ -127,6 +161,10 @@ func (ah *ARPHandler) SendARPReply(targetIP net.IP, targetMAC net.HardwareAddr) 
 
 	// 创建 ARP 回复包
 	arpReply := &arp.Packet{
+		HardwareType:       1,      // 以太网
+		ProtocolType:       0x0800, // IPv4
+		HardwareAddrLength: 6,      // MAC地址长度
+		IPLength:           4,      // IPv4地址长度
 		Operation:          arp.OperationReply,
 		SenderHardwareAddr: ah.localMAC,
 		SenderIP:           senderIPAddr,
@@ -134,18 +172,31 @@ func (ah *ARPHandler) SendARPReply(targetIP net.IP, targetMAC net.HardwareAddr) 
 		TargetIP:           targetIPAddr,
 	}
 
+	log.Printf("[ARP] ARP回复包内容 - 操作: %d, 发送者IP: %s, 发送者MAC: %s, 目标IP: %s, 目标MAC: %s",
+		arpReply.Operation,
+		arpReply.SenderIP.String(), arpReply.SenderHardwareAddr.String(),
+		arpReply.TargetIP.String(), arpReply.TargetHardwareAddr.String())
+
 	// 序列化 ARP 包
 	arpData, err := arpReply.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("序列化ARP回复失败: %v", err)
 	}
 
-	// 发送 ARP 回复
-	return ah.sendVXLANPacket(arpData, targetMAC)
+	// 根据模式选择发送方式
+	if isVXLAN {
+		return ah.sendVXLANPacket(arpData, targetMAC)
+	} else {
+		return ah.sendDirectPacket(arpData, targetMAC)
+	}
 }
 
 // sendVXLANPacket 通过 VXLAN 发送 ARP 包
 func (ah *ARPHandler) sendVXLANPacket(arpData []byte, dstMAC net.HardwareAddr) error {
+	// 调试信息：打印ARP数据
+	log.Printf("[ARP] 构建的ARP数据 (长度: %d): %x", len(arpData), arpData)
+	log.Printf("[ARP] 目标MAC: %s, 本地MAC: %s", dstMAC.String(), ah.localMAC.String())
+
 	// 构建以太网帧
 	ethFrame := &ethernet.Frame{
 		Destination: dstMAC,
@@ -160,28 +211,51 @@ func (ah *ARPHandler) sendVXLANPacket(arpData []byte, dstMAC net.HardwareAddr) e
 		return fmt.Errorf("序列化以太网帧失败: %v", err)
 	}
 
-	log.Printf("[ARP] 发送ARP包，长度: %d字节", len(frameData))
+	log.Printf("[ARP] 发送VXLAN ARP包，以太网帧长度: %d字节", len(frameData))
+	log.Printf("[ARP] 以太网帧数据: %x", frameData)
 
-	// 通过VXLAN发送
-	if ah.vxlanConfig != nil {
-		handler := NewVXLANHandler(ah.vxlanConfig)
-
-		// 对于ARP包，我们需要构造一个虚拟的IP包进行封装
-		srcIP := ah.vxlanConfig.LocalIP
-		dstIP := net.IPv4bcast
-
-		// 使用VXLAN封装以太网帧
-		vxlanPacket, err := handler.EncapsulateVXLAN(
-			frameData, srcIP, dstIP, 0, 0, 0) // ARP不需要端口信息
-		if err != nil {
-			return fmt.Errorf("VXLAN封装ARP失败: %v", err)
-		}
-
-		log.Printf("[ARP] 通过VXLAN发送ARP包，封装后长度: %d字节", len(vxlanPacket))
-		return SendRawBytes(vxlanPacket)
+	// 获取全局VXLAN处理器
+	handler := GetGlobalVXLANHandler()
+	if handler == nil {
+		return fmt.Errorf("全局VXLAN处理器未初始化")
 	}
 
-	// 直接发送
+	// 直接使用VXLAN封装以太网帧 (不是IP包)
+	// ARP包是二层协议，应该直接封装以太网帧
+	vxlanPacket, err := handler.EncapsulateEthernetFrame(frameData)
+	if err != nil {
+		return fmt.Errorf("VXLAN封装ARP失败: %v", err)
+	}
+
+	log.Printf("[ARP] 通过VXLAN发送ARP包，封装后长度: %d字节", len(vxlanPacket))
+	// 安全地打印前64字节或整个包（如果包更小）
+	debugLen := 64
+	if len(vxlanPacket) < debugLen {
+		debugLen = len(vxlanPacket)
+	}
+	log.Printf("[ARP] VXLAN封装后数据的前%d字节: %x", debugLen, vxlanPacket[:debugLen])
+	return SendRawBytes(vxlanPacket)
+}
+
+// sendDirectPacket 直接发送 ARP 包（不通过 VXLAN）
+func (ah *ARPHandler) sendDirectPacket(arpData []byte, dstMAC net.HardwareAddr) error {
+	// 构建以太网帧
+	ethFrame := &ethernet.Frame{
+		Destination: dstMAC,
+		Source:      ah.localMAC,
+		EtherType:   ethernet.EtherTypeARP,
+		Payload:     arpData,
+	}
+
+	// 序列化以太网帧
+	frameData, err := ethFrame.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("序列化以太网帧失败: %v", err)
+	}
+
+	log.Printf("[ARP] 直接发送ARP包，长度: %d字节", len(frameData))
+
+	// 直接发送原始以太网帧
 	return SendRawBytes(frameData)
 }
 
@@ -218,10 +292,43 @@ func (ah *ARPHandler) HandleARPPacket(data []byte) error {
 		if targetIP.Equal(ah.localIP) {
 			log.Printf("[ARP] 收到针对本机IP的ARP请求，发送回复")
 			return ah.SendARPReply(senderIP, arpPacket.SenderHardwareAddr)
+
 		}
 	case arp.OperationReply:
 		// ARP回复，已经更新了ARP表
 		log.Printf("[ARP] 收到ARP回复，已更新ARP表")
+	}
+
+	return nil
+}
+
+// HandleVXLANARPPacket 专门处理 VXLAN 内层的 ARP 包
+func (ah *ARPHandler) HandleVXLANARPPacket(data []byte) error {
+	arpPacket, err := ah.ParseARPPacket(data)
+	if err != nil {
+		return fmt.Errorf("解析VXLAN ARP包失败: %v", err)
+	}
+
+	log.Printf("[ARP] 收到VXLAN ARP包: 操作=%d, 发送者=%s(%s), 目标=%s(%s)",
+		arpPacket.Operation,
+		arpPacket.SenderIP.String(), arpPacket.SenderHardwareAddr.String(),
+		arpPacket.TargetIP.String(), arpPacket.TargetHardwareAddr.String())
+
+	// 更新ARP表 - 转换netip.Addr为net.IP
+	senderIP := net.ParseIP(arpPacket.SenderIP.String())
+	ah.arpTable.AddEntry(senderIP, arpPacket.SenderHardwareAddr)
+
+	switch arpPacket.Operation {
+	case arp.OperationRequest:
+		// 如果是请求我们的IP，发送VXLAN回复
+		targetIP := net.ParseIP(arpPacket.TargetIP.String())
+		if targetIP.Equal(ah.localIP) {
+			log.Printf("[ARP] 收到针对本机IP的VXLAN ARP请求，发送VXLAN回复")
+			return ah.SendVXLANARPReply(senderIP, arpPacket.SenderHardwareAddr)
+		}
+	case arp.OperationReply:
+		// ARP回复，已经更新了ARP表
+		log.Printf("[ARP] 收到VXLAN ARP回复，已更新ARP表")
 	}
 
 	return nil

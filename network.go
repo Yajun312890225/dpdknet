@@ -169,9 +169,10 @@ func initializeVXLANNetworkStack() error {
 		)
 	}
 	// 创建 ARP 处理器
-	arpHandler := NewARPHandler(vxlanIP, vxlanConfig.LocalMAC, vxlanConfig)
+	arpHandler := NewARPHandler(vxlanIP, vxlanConfig.LocalMAC)
 	arpHandler.arpTable.AddEntry(gatewayIP, gatewayMAC)
 
+	SetGlobalVXLANARPHandler(arpHandler)
 	return nil
 }
 
@@ -270,7 +271,9 @@ func SendRawBytes(data []byte) error {
 		// 队列满时立即失败，不重试（避免阻塞）
 		return fmt.Errorf("global byte send channel full")
 	}
-} // SendPacket 通过全局发送通道发送数据包，非阻塞
+}
+
+// SendPacket 通过全局发送通道发送数据包，非阻塞
 func SendPacket(pkt *packet.Packet) error {
 	// 只尝试非阻塞发送，避免任何形式的延迟
 	select {

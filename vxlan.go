@@ -213,6 +213,24 @@ type VXLANHandler struct {
 	config *VXLANConfig
 }
 
+// 全局VXLAN ARP处理器
+var globalVXLANARPHandler *ARPHandler
+var vxlanARPMutex sync.RWMutex
+
+// SetGlobalVXLANARPHandler 设置全局VXLAN ARP处理器
+func SetGlobalVXLANARPHandler(handler *ARPHandler) {
+	vxlanARPMutex.Lock()
+	defer vxlanARPMutex.Unlock()
+	globalVXLANARPHandler = handler
+}
+
+// GetGlobalVXLANARPHandler 获取全局VXLAN ARP处理器
+func GetGlobalVXLANARPHandler() *ARPHandler {
+	vxlanARPMutex.RLock()
+	defer vxlanARPMutex.RUnlock()
+	return globalVXLANARPHandler
+}
+
 // NewVXLANHandler 创建新的 VXLAN 处理器
 func NewVXLANHandler(config *VXLANConfig) *VXLANHandler {
 	if config == nil {
@@ -282,6 +300,63 @@ func (vh *VXLANHandler) EncapsulateVXLAN(innerPayload []byte, innerSrcIP, innerD
 	err := gopacket.SerializeLayers(buf, opts, layersToSerialize...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize VXLAN packet: %v", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+// EncapsulateEthernetFrame 封装以太网帧到VXLAN包
+func (vh *VXLANHandler) EncapsulateEthernetFrame(ethernetFrame []byte) ([]byte, error) {
+	// 创建包缓冲区
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	// 1. 构建外层以太网头
+	ethLayer := &layers.Ethernet{
+		SrcMAC:       vh.config.LocalMAC,
+		DstMAC:       vh.config.RemoteMAC,
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	// 2. 构建外层 IP 头
+	ipLayer := &layers.IPv4{
+		Version:  4,
+		IHL:      5,
+		TTL:      64,
+		Protocol: layers.IPProtocolUDP,
+		SrcIP:    vh.config.LocalIP,
+		DstIP:    vh.config.RemoteIP,
+	}
+
+	// 3. 构建外层 UDP 头
+	udpLayer := &layers.UDP{
+		SrcPort: layers.UDPPort(10000 + uint16((vh.config.VNI)%55535)), // 简单随机
+		DstPort: layers.UDPPort(vh.config.UDPPort),
+	}
+	udpLayer.SetNetworkLayerForChecksum(ipLayer)
+
+	// 4. 构建 VXLAN 头
+	vxlanLayer := &layers.VXLAN{
+		ValidIDFlag: true,
+		VNI:         vh.config.VNI,
+	}
+
+	// 5. 直接使用提供的以太网帧作为VXLAN载荷
+	layersToSerialize := []gopacket.SerializableLayer{
+		ethLayer, ipLayer, udpLayer, vxlanLayer,
+	}
+
+	// 添加原始以太网帧作为载荷
+	payloadLayer := gopacket.Payload(ethernetFrame)
+	layersToSerialize = append(layersToSerialize, payloadLayer)
+
+	// 序列化所有层
+	err := gopacket.SerializeLayers(buf, opts, layersToSerialize...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize VXLAN ethernet frame: %v", err)
 	}
 
 	return buf.Bytes(), nil
@@ -527,24 +602,344 @@ func handleIncomingVXLANPacket(data []byte) {
 		return
 	}
 
-	// 直接注入原始的VXLAN内层数据到gVisor
+	// 从VXLAN包中提取完整的内层以太网帧
+	packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
+	vxlanLayer := packet.Layer(layers.LayerTypeVXLAN)
+	if vxlanLayer == nil {
+		return
+	}
+
+	vxlan := vxlanLayer.(*layers.VXLAN)
+	innerEthernetFrame := vxlan.LayerPayload() // 完整的内层以太网帧
+
+	if len(innerEthernetFrame) < 14 {
+		return // 以太网帧太短
+	}
+
+	// 解析内层以太网帧
+	innerPacket := gopacket.NewPacket(innerEthernetFrame, layers.LayerTypeEthernet, gopacket.Default)
+
+	// 检查是否为ARP包
+	if arpLayer := innerPacket.Layer(layers.LayerTypeARP); arpLayer != nil {
+		handleVXLANARPPacket(arpLayer.(*layers.ARP), innerEthernetFrame)
+		return
+	}
+
+	// 处理非ARP包（IP包等）
 	if gvisor := GetGVisorNetstack(); gvisor != nil {
-		// 从VXLAN包中提取完整的内层以太网帧
-		packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.Default)
-		vxlanLayer := packet.Layer(layers.LayerTypeVXLAN)
-		if vxlanLayer != nil {
-			vxlan := vxlanLayer.(*layers.VXLAN)
-			innerEthernetFrame := vxlan.LayerPayload() // 完整的内层以太网帧
+		// 修复目标MAC地址：将内层目标MAC替换为本地gVisor的MAC地址
+		localMAC := GetLocalMAC()
+		copy(innerEthernetFrame[0:6], localMAC)
 
-			// 检查内层以太网帧的MAC地址
-			if len(innerEthernetFrame) >= 14 {
-				// 修复目标MAC地址：将内层目标MAC替换为本地gVisor的MAC地址
-				localMAC := GetLocalMAC()
-				copy(innerEthernetFrame[0:6], localMAC)
-			}
+		gvisor.InjectDPDKPacket(innerEthernetFrame)
+	}
+}
 
-			gvisor.InjectDPDKPacket(innerEthernetFrame)
+// handleVXLANARPPacket 处理VXLAN内层的ARP包
+func handleVXLANARPPacket(arp *layers.ARP, originalFrame []byte) {
+	// 使用全局VXLAN ARP处理器
+	globalARPHandler := GetGlobalVXLANARPHandler()
+	if globalARPHandler == nil {
+		fmt.Println("Global VXLAN ARP handler is not set")
+		return
+	}
+
+	// 提取原始ARP数据（去掉以太网头）
+	if len(originalFrame) < 14 {
+		return
+	}
+
+	// 以太网帧格式：目标MAC(6) + 源MAC(6) + 类型(2) + 载荷
+	arpData := originalFrame[14:] // 跳过以太网头
+
+	// 使用全局VXLAN ARP处理器专门处理VXLAN ARP包
+	err := globalARPHandler.HandleVXLANARPPacket(arpData)
+	if err != nil {
+		fmt.Printf("[VXLAN] 处理VXLAN ARP包失败: %v\n", err)
+		return
+	}
+}
+
+// handleARPRequest 处理ARP请求
+func handleARPRequest(arp *layers.ARP, config *VXLANConfig, originalFrame []byte) {
+	// 提取ARP请求信息
+	srcIP := net.IP(arp.SourceProtAddress)
+	dstIP := net.IP(arp.DstProtAddress)
+	srcMAC := net.HardwareAddr(arp.SourceHwAddress)
+
+	// 更新ARP缓存
+	config.SetARPEntry(srcIP, srcMAC)
+
+	// 检查是否是询问我们的IP
+	if !isOurIP(dstIP) {
+		return // 不是询问我们的IP，忽略
+	}
+
+	// 构造ARP回复
+	arpReply := createARPReply(srcIP, srcMAC, dstIP, GetLocalMAC())
+	if arpReply == nil {
+		return
+	}
+
+	// 通过VXLAN发送ARP回复
+	sendVXLANARPReply(arpReply, config)
+}
+
+// handleARPReply 处理ARP回复
+func handleARPReply(arp *layers.ARP, config *VXLANConfig) {
+	// 提取ARP回复信息
+	srcIP := net.IP(arp.SourceProtAddress)
+	srcMAC := net.HardwareAddr(arp.SourceHwAddress)
+
+	// 更新ARP缓存
+	config.SetARPEntry(srcIP, srcMAC)
+}
+
+// isOurIP 检查IP是否属于本地
+func isOurIP(ip net.IP) bool {
+	// 检查是否是本地配置的IP
+	if config := GetGlobalVXLANConfig(); config != nil {
+		// 这里需要检查gVisor网络栈中配置的IP地址
+		// 简化实现：检查是否是11.x.x.x网段的特定IP
+		if ip4 := ip.To4(); ip4 != nil {
+			// 假设我们的内层IP是11.1.1.2
+			return ip4[0] == 11 && ip4[1] == 1 && ip4[2] == 1 && ip4[3] == 2
 		}
+	}
+	return false
+}
+
+// createARPReply 创建ARP回复包
+func createARPReply(targetIP net.IP, targetMAC net.HardwareAddr, sourceIP net.IP, sourceMAC net.HardwareAddr) []byte {
+	// 创建以太网头
+	ethLayer := &layers.Ethernet{
+		SrcMAC:       sourceMAC,
+		DstMAC:       targetMAC,
+		EthernetType: layers.EthernetTypeARP,
+	}
+
+	// 创建ARP层
+	arpLayer := &layers.ARP{
+		AddrType:          layers.LinkTypeEthernet,
+		Protocol:          layers.EthernetTypeIPv4,
+		HwAddressSize:     6,
+		ProtAddressSize:   4,
+		Operation:         layers.ARPReply,
+		SourceHwAddress:   sourceMAC,
+		SourceProtAddress: sourceIP.To4(),
+		DstHwAddress:      targetMAC,
+		DstProtAddress:    targetIP.To4(),
+	}
+
+	// 序列化ARP包
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	err := gopacket.SerializeLayers(buf, opts, ethLayer, arpLayer)
+	if err != nil {
+		return nil
+	}
+
+	return buf.Bytes()
+}
+
+// sendVXLANARPReply 通过VXLAN发送ARP回复
+func sendVXLANARPReply(arpReplyFrame []byte, config *VXLANConfig) {
+	if len(arpReplyFrame) == 0 {
+		return
+	}
+
+	// 构建外层以太网头
+	outerEthLayer := &layers.Ethernet{
+		SrcMAC:       config.LocalMAC,
+		DstMAC:       config.RemoteMAC,
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	// 构建外层IP头
+	outerIPLayer := &layers.IPv4{
+		Version:  4,
+		IHL:      5,
+		TTL:      64,
+		Protocol: layers.IPProtocolUDP,
+		SrcIP:    config.LocalIP,
+		DstIP:    config.RemoteIP,
+	}
+
+	// 构建外层UDP头
+	outerUDPLayer := &layers.UDP{
+		SrcPort: layers.UDPPort(10000 + uint16(config.VNI%55535)),
+		DstPort: layers.UDPPort(config.UDPPort),
+	}
+	outerUDPLayer.SetNetworkLayerForChecksum(outerIPLayer)
+
+	// 构建VXLAN头
+	vxlanLayer := &layers.VXLAN{
+		ValidIDFlag: true,
+		VNI:         config.VNI,
+	}
+
+	// 序列化完整的VXLAN包
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	// 将ARP回复帧作为VXLAN载荷
+	payloadLayer := gopacket.Payload(arpReplyFrame)
+
+	err := gopacket.SerializeLayers(buf, opts,
+		outerEthLayer,
+		outerIPLayer,
+		outerUDPLayer,
+		vxlanLayer,
+		payloadLayer,
+	)
+
+	if err != nil {
+		return
+	}
+
+	// 发送VXLAN封装的ARP回复
+	vxlanPacket := buf.Bytes()
+	if globalHandler := GetGlobalVXLANHandler(); globalHandler != nil {
+		// 通过全局VXLAN处理器发送
+		SendRawBytes(vxlanPacket)
+	}
+}
+
+// SendARPRequest 主动发送ARP请求（用于主动学习MAC地址）
+func SendARPRequest(targetIP net.IP, config *VXLANConfig) {
+	if config == nil {
+		config = GetGlobalVXLANConfig()
+		if config == nil {
+			return
+		}
+	}
+
+	// 确保全局VXLAN处理器可用
+	globalHandler := GetGlobalVXLANHandler()
+	if globalHandler == nil {
+		return
+	}
+
+	// 生成本地虚拟MAC（用于内层ARP请求）
+	localInnerMAC := generateInnerSrcMAC(net.ParseIP("11.1.1.2")) // 假设本地内层IP
+
+	// 创建ARP请求包
+	arpRequest := createARPRequest(net.ParseIP("11.1.1.2"), localInnerMAC, targetIP)
+	if arpRequest == nil {
+		return
+	}
+
+	// 通过VXLAN发送ARP请求
+	sendVXLANARPRequest(arpRequest, config)
+}
+
+// createARPRequest 创建ARP请求包
+func createARPRequest(sourceIP net.IP, sourceMAC net.HardwareAddr, targetIP net.IP) []byte {
+	// 创建以太网头（广播）
+	ethLayer := &layers.Ethernet{
+		SrcMAC:       sourceMAC,
+		DstMAC:       net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}, // 广播MAC
+		EthernetType: layers.EthernetTypeARP,
+	}
+
+	// 创建ARP层
+	arpLayer := &layers.ARP{
+		AddrType:          layers.LinkTypeEthernet,
+		Protocol:          layers.EthernetTypeIPv4,
+		HwAddressSize:     6,
+		ProtAddressSize:   4,
+		Operation:         layers.ARPRequest,
+		SourceHwAddress:   sourceMAC,
+		SourceProtAddress: sourceIP.To4(),
+		DstHwAddress:      net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // 未知MAC
+		DstProtAddress:    targetIP.To4(),
+	}
+
+	// 序列化ARP包
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	err := gopacket.SerializeLayers(buf, opts, ethLayer, arpLayer)
+	if err != nil {
+		return nil
+	}
+
+	return buf.Bytes()
+}
+
+// sendVXLANARPRequest 通过VXLAN发送ARP请求
+func sendVXLANARPRequest(arpRequestFrame []byte, config *VXLANConfig) {
+	if len(arpRequestFrame) == 0 {
+		return
+	}
+
+	// 构建外层以太网头
+	outerEthLayer := &layers.Ethernet{
+		SrcMAC:       config.LocalMAC,
+		DstMAC:       config.RemoteMAC,
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+
+	// 构建外层IP头
+	outerIPLayer := &layers.IPv4{
+		Version:  4,
+		IHL:      5,
+		TTL:      64,
+		Protocol: layers.IPProtocolUDP,
+		SrcIP:    config.LocalIP,
+		DstIP:    config.RemoteIP,
+	}
+
+	// 构建外层UDP头
+	outerUDPLayer := &layers.UDP{
+		SrcPort: layers.UDPPort(10000 + uint16(config.VNI%55535)),
+		DstPort: layers.UDPPort(config.UDPPort),
+	}
+	outerUDPLayer.SetNetworkLayerForChecksum(outerIPLayer)
+
+	// 构建VXLAN头
+	vxlanLayer := &layers.VXLAN{
+		ValidIDFlag: true,
+		VNI:         config.VNI,
+	}
+
+	// 序列化完整的VXLAN包
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+
+	// 将ARP请求帧作为VXLAN载荷
+	payloadLayer := gopacket.Payload(arpRequestFrame)
+
+	err := gopacket.SerializeLayers(buf, opts,
+		outerEthLayer,
+		outerIPLayer,
+		outerUDPLayer,
+		vxlanLayer,
+		payloadLayer,
+	)
+
+	if err != nil {
+		return
+	}
+
+	// 发送VXLAN封装的ARP请求
+	vxlanPacket := buf.Bytes()
+	if globalHandler := GetGlobalVXLANHandler(); globalHandler != nil {
+		// 通过全局VXLAN处理器发送
+		SendRawBytes(vxlanPacket)
 	}
 }
 
