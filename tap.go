@@ -371,26 +371,13 @@ func (tm *TapManager) modifyReturnPacketHeaders(packet []byte) []byte {
 
 	copy(modifiedPacket[6:12], localMAC[:])
 
-	// // 将目标MAC改为DPDK网卡的MAC（因为要发送给DPDK网卡）
-	// dpdkMAC := parseMACAddress(DPDK_MAC)
-	// if dpdkMAC != nil {
-	// 	copy(modifiedPacket[0:6], dpdkMAC)
-	// }
-
 	// 检查是否是IP包并修改IP地址
 	etherType := uint16(packet[12])<<8 | uint16(packet[13])
 	if etherType == 0x0800 && len(packet) >= 34 {
 		ipOffset := 14
 
-		// 对于从TAP返回的包，我们需要：
-		// 1. 将源IP从172.16.1.1改为192.168.66.57（原始目标服务器IP）
-		// 2. 保持目标IP为171.213.255.230（原始客户端IP）
-
 		// 将源IP改为原始的目标服务器IP
-		originalServerIP := parseIPAddress("192.168.66.57")
-		if originalServerIP != nil {
-			copy(modifiedPacket[ipOffset+12:ipOffset+16], originalServerIP)
-		}
+		copy(modifiedPacket[ipOffset+12:ipOffset+16], getLocalIPFromEnv().To4())
 
 		// 目标IP保持不变，应该是171.213.255.230
 
@@ -412,6 +399,7 @@ func (tm *TapManager) modifyReturnPacketHeaders(packet []byte) []byte {
 
 // handleNormalPacket 处理来自正常TAP的数据包
 func (tm *TapManager) handleNormalPacket(packet []byte) error {
+	log.Printf("[TAP] 收到正常TAP数据包，长度: %d字节，目标MAC: %s", len(packet), getDestinationMAC(packet))
 	// 修改回包的源IP和源MAC为DPDK的地址
 	modifiedPacket := tm.modifyReturnPacketHeaders(packet)
 

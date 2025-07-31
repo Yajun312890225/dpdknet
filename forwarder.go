@@ -106,7 +106,6 @@ func (pf *PacketForwarder) ProcessDPDKPacket(packet []byte) error {
 	for _, filter := range pf.filters {
 		if filter.ShouldProcess(packet) {
 			shouldProcess = true
-			log.Printf("[Forwarder] 过滤器 %s 决定转发到TAP", filter.GetName())
 			break
 		}
 	}
