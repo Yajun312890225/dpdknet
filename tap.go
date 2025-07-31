@@ -18,12 +18,6 @@ const (
 
 	// 固定的目标IP地址
 	TARGET_IP = "172.16.1.1"
-
-	// DPDK网卡MAC地址
-	DPDK_MAC = "fe:ee:89:96:ac:a3"
-
-	// DPDK网卡IP地址
-	DPDK_IP = "171.213.255.230"
 )
 
 // TapDevice TAP 设备管理器，使用water库
@@ -77,7 +71,6 @@ func NewTapDevice(name, bridge string) (*TapDevice, error) {
 		return nil, fmt.Errorf("配置TAP设备失败: %v", err)
 	}
 
-	log.Printf("[TAP] 创建TAP设备成功: %s, 绑定到网桥: %s", name, bridge)
 	return tap, nil
 }
 
@@ -106,7 +99,6 @@ func NewTapManager(bridge string) (*TapManager, error) {
 	normalTap.SetPacketHandler(manager.handleNormalPacket)
 	vxlanTap.SetPacketHandler(manager.handleVXLANPacket)
 
-	log.Printf("[TAP] TAP管理器创建成功，绑定到网桥: %s", bridge)
 	return manager, nil
 }
 
@@ -144,21 +136,10 @@ func (t *TapDevice) configure() error {
 
 	// 添加到网桥
 	if err := runCommand("brctl", "addif", t.bridge, t.name); err != nil {
-		// 如果失败，尝试创建网桥后再添加
-		log.Printf("[TAP] 添加到网桥失败，尝试创建网桥: %s", t.bridge)
-		if err := runCommand("brctl", "addbr", t.bridge); err != nil {
-			log.Printf("[TAP] 创建网桥失败: %v", err)
-		}
-		if err := runCommand("ip", "link", "set", t.bridge, "up"); err != nil {
-			log.Printf("[TAP] 启动网桥失败: %v", err)
-		}
-		// 再次尝试添加到网桥
-		if err := runCommand("brctl", "addif", t.bridge, t.name); err != nil {
-			return fmt.Errorf("添加TAP接口到网桥失败: %v", err)
-		}
-	}
 
-	log.Printf("[TAP] TAP设备配置完成: %s -> %s", t.name, t.bridge)
+		return fmt.Errorf("添加TAP接口到网桥失败: %v", err)
+
+	}
 
 	return nil
 }
@@ -244,24 +225,11 @@ func (t *TapDevice) SendPacket(packet []byte) error {
 		return fmt.Errorf("TAP设备 %s 未运行", t.name)
 	}
 
-	// 调试：输出原始数据包信息
-	log.Printf("[TAP] 发送原始数据包到 %s: 长度=%d, 前64字节=%s",
-		t.name, len(packet), dumpPacketHex(packet, 64))
-
-	// 分析TCP包
-	analyzeTCPPacket(packet, "OUT")
-
-	// 修改数据包的目标IP为172.16.1.1，目标MAC为aa:c3:49:f5:a4:33
+	// 修改数据包的目标IP为172.16.1.1，目标MAC
 	modifiedPacket, err := t.modifyPacketHeaders(packet)
 	if err != nil {
 		log.Printf("[TAP] 修改数据包头失败: %v", err)
 		modifiedPacket = packet // 如果修改失败，使用原始包
-	}
-
-	// 调试：输出修改后的数据包信息
-	if len(modifiedPacket) != len(packet) || dumpPacketHex(modifiedPacket, 64) != dumpPacketHex(packet, 64) {
-		log.Printf("[TAP] 修改后数据包: 长度=%d, 前64字节=%s",
-			len(modifiedPacket), dumpPacketHex(modifiedPacket, 64))
 	}
 
 	n, err := t.iface.Write(modifiedPacket)
@@ -277,7 +245,6 @@ func (t *TapDevice) SendPacket(packet []byte) error {
 	t.txPackets++
 	t.mutex.Unlock()
 
-	// log.Printf("[TAP] 发送数据包到 %s: %d字节", t.name, len(modifiedPacket))
 	return nil
 }
 
@@ -402,12 +369,6 @@ func (tm *TapManager) modifyReturnPacketHeaders(packet []byte) []byte {
 	modifiedPacket := make([]byte, len(packet))
 	copy(modifiedPacket, packet)
 
-	// 获取原始地址信息用于日志
-	originalSrcMAC := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
-		packet[6], packet[7], packet[8], packet[9], packet[10], packet[11])
-	originalDstMAC := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
-		packet[0], packet[1], packet[2], packet[3], packet[4], packet[5])
-
 	copy(modifiedPacket[6:12], localMAC[:])
 
 	// // 将目标MAC改为DPDK网卡的MAC（因为要发送给DPDK网卡）
@@ -420,10 +381,6 @@ func (tm *TapManager) modifyReturnPacketHeaders(packet []byte) []byte {
 	etherType := uint16(packet[12])<<8 | uint16(packet[13])
 	if etherType == 0x0800 && len(packet) >= 34 {
 		ipOffset := 14
-
-		// 获取原始IP地址
-		originalSrcIP := fmt.Sprintf("%d.%d.%d.%d", packet[ipOffset+12], packet[ipOffset+13], packet[ipOffset+14], packet[ipOffset+15])
-		originalDstIP := fmt.Sprintf("%d.%d.%d.%d", packet[ipOffset+16], packet[ipOffset+17], packet[ipOffset+18], packet[ipOffset+19])
 
 		// 对于从TAP返回的包，我们需要：
 		// 1. 将源IP从172.16.1.1改为192.168.66.57（原始目标服务器IP）
@@ -448,14 +405,6 @@ func (tm *TapManager) modifyReturnPacketHeaders(packet []byte) []byte {
 				log.Printf("[TAP] 更新回包TCP校验和失败: %v", err)
 			}
 		}
-
-		log.Printf("[TAP] 修改回包头部: 目标MAC %s->%s, 源MAC %s->%s, 源IP %s->%s, 目标IP %s(保持不变)",
-			originalDstMAC, fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
-				localMAC[0], localMAC[1], localMAC[2], localMAC[3], localMAC[4], localMAC[5]), originalSrcMAC, TAP_NORMAL_MAC, originalSrcIP, "192.168.66.57", originalDstIP)
-	} else {
-		log.Printf("[TAP] 修改回包MAC: 目标MAC %s->%s, 源MAC %s->%s",
-			originalDstMAC, fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
-				packet[6], packet[7], packet[8], packet[9], packet[10], packet[11]), originalSrcMAC, TAP_NORMAL_MAC)
 	}
 
 	return modifiedPacket
@@ -463,35 +412,6 @@ func (tm *TapManager) modifyReturnPacketHeaders(packet []byte) []byte {
 
 // handleNormalPacket 处理来自正常TAP的数据包
 func (tm *TapManager) handleNormalPacket(packet []byte) error {
-	log.Printf("[TAP] 收到正常TAP数据包: %d字节, 前32字节=%s",
-		len(packet), dumpPacketHex(packet, 32))
-
-	// 分析TCP包
-	analyzeTCPPacket(packet, "IN")
-
-	// 分析包类型
-	if len(packet) >= 14 {
-		etherType := uint16(packet[12])<<8 | uint16(packet[13])
-		if etherType == 0x0800 && len(packet) >= 34 {
-			// IPv4包
-			protocol := packet[23]
-			srcIP := fmt.Sprintf("%d.%d.%d.%d", packet[26], packet[27], packet[28], packet[29])
-			dstIP := fmt.Sprintf("%d.%d.%d.%d", packet[30], packet[31], packet[32], packet[33])
-
-			protocolName := "Unknown"
-			switch protocol {
-			case 6:
-				protocolName = "TCP"
-			case 17:
-				protocolName = "UDP"
-			case 1:
-				protocolName = "ICMP"
-			}
-
-			log.Printf("[TAP] 从TAP收到%s包: %s -> %s", protocolName, srcIP, dstIP)
-		}
-	}
-
 	// 修改回包的源IP和源MAC为DPDK的地址
 	modifiedPacket := tm.modifyReturnPacketHeaders(packet)
 
@@ -501,8 +421,6 @@ func (tm *TapManager) handleNormalPacket(packet []byte) error {
 
 // handleVXLANPacket 处理来自VXLAN TAP的数据包
 func (tm *TapManager) handleVXLANPacket(packet []byte) error {
-	// log.Printf("[TAP] 收到VXLAN TAP数据包: %d字节", len(packet))
-
 	// 检查是否是VXLAN包，如果是则进行特殊处理
 	if isVXLANPacket(packet) {
 		handler := GetGlobalVXLANHandler()
@@ -568,26 +486,16 @@ func (t *TapDevice) modifyPacketHeaders(packet []byte) ([]byte, error) {
 	modifiedPacket := make([]byte, len(packet))
 	copy(modifiedPacket, packet)
 
-	// 获取原始MAC地址用于日志
-	originalDestMAC := getDestinationMAC(packet)
-
 	// 修改目标MAC地址 (以太网头前6字节)
 	copy(modifiedPacket[0:6], targetMAC)
 
-	// 检查多个可能的EtherType位置
-	etherType := uint16(packet[12])<<8 | uint16(packet[13])
-	ipOffset := -1
-
-	log.Printf("[TAP] 数据包分析: 长度=%d, EtherType@12-13=0x%04x, 原始目标MAC=%s",
-		len(packet), etherType, originalDestMAC)
-
 	// 尝试在不同位置查找IPv4头部 (0x45表示IPv4且头长度为20字节)
+	ipOffset := -1
 	for i := 14; i <= 18 && i < len(packet); i++ {
 		if packet[i] == 0x45 && i+20 < len(packet) {
 			// 检查是否真的是IP包 (查看协议字段等)
 			if packet[i+9] == 0x06 || packet[i+9] == 0x11 || packet[i+9] == 0x01 { // TCP/UDP/ICMP
 				ipOffset = i
-				log.Printf("[TAP] 发现IPv4头部在偏移 %d", ipOffset)
 				break
 			}
 		}
@@ -595,10 +503,6 @@ func (t *TapDevice) modifyPacketHeaders(packet []byte) ([]byte, error) {
 
 	// 如果找到了IP头，修改IP地址
 	if ipOffset >= 0 && ipOffset+20 <= len(packet) {
-		// 获取原始目标IP地址用于日志
-		originalDestIP := fmt.Sprintf("%d.%d.%d.%d",
-			packet[ipOffset+16], packet[ipOffset+17], packet[ipOffset+18], packet[ipOffset+19])
-
 		// 解析目标IP地址
 		targetIPBytes := parseIPAddress(targetIP)
 		if targetIPBytes == nil {
@@ -619,12 +523,6 @@ func (t *TapDevice) modifyPacketHeaders(packet []byte) ([]byte, error) {
 				log.Printf("[TAP] 更新TCP校验和失败: %v", err)
 			}
 		}
-
-		log.Printf("[TAP] 修改数据包头: MAC %s->%s, IP %s->%s (TAP: %s)",
-			originalDestMAC, getTapMACByName(t.name), originalDestIP, targetIP, t.name)
-	} else {
-		log.Printf("[TAP] 修改目标MAC地址: %s->%s (未找到IP头, TAP: %s)",
-			originalDestMAC, getTapMACByName(t.name), t.name)
 	}
 
 	return modifiedPacket, nil
@@ -723,22 +621,6 @@ func getTapMACByName(tapName string) string {
 	}
 }
 
-// getDestinationIP 获取数据包的目标IP地址
-func getDestinationIP(packet []byte) string {
-	if len(packet) < 34 {
-		return "unknown"
-	}
-
-	// 检查是否是IP包
-	etherType := uint16(packet[12])<<8 | uint16(packet[13])
-	if etherType != 0x0800 {
-		return "non-IP"
-	}
-
-	// 提取目标IP (IP头第16-19字节)
-	return fmt.Sprintf("%d.%d.%d.%d", packet[30], packet[31], packet[32], packet[33])
-}
-
 // getDestinationMAC 获取数据包的目标MAC地址
 func getDestinationMAC(packet []byte) string {
 	if len(packet) < 6 {
@@ -748,28 +630,6 @@ func getDestinationMAC(packet []byte) string {
 	// 提取目标MAC (以太网头前6字节)
 	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
 		packet[0], packet[1], packet[2], packet[3], packet[4], packet[5])
-}
-
-// dumpPacketHex 输出数据包的十六进制内容 (用于调试)
-func dumpPacketHex(packet []byte, maxLen int) string {
-	length := len(packet)
-	if maxLen > 0 && length > maxLen {
-		length = maxLen
-	}
-
-	var hex strings.Builder
-	for i := 0; i < length; i++ {
-		hex.WriteString(fmt.Sprintf("%02x", packet[i]))
-	}
-	if len(packet) > length {
-		hex.WriteString("...")
-	}
-	return hex.String()
-}
-
-// updateIPChecksum 更新IP头校验和
-func updateIPChecksum(packet []byte) error {
-	return updateIPChecksumAtOffset(packet, 14)
 }
 
 // updateIPChecksumAtOffset 在指定偏移位置更新IP头校验和
@@ -883,93 +743,4 @@ func updateTCPChecksumAtOffset(packet []byte, ipOffset int) error {
 	packet[tcpOffset+17] = byte(checksum & 0xFF)
 
 	return nil
-}
-
-// 测试函数：分析提供的数据包格式
-func analyzeTestPacket() {
-	// 您提供的测试数据包
-	hexData := "000400010006feee8996aca30000080045a0003c203b4000fb060613abd5ffe6ac1001015731270f1a70cdbf00000000a002faf0ed3300000204058c0402080a7a42d0b20000000001030307"
-
-	// 将十六进制字符串转换为字节数组
-	packet := make([]byte, len(hexData)/2)
-	for i := 0; i < len(hexData); i += 2 {
-		var b byte
-		fmt.Sscanf(hexData[i:i+2], "%02x", &b)
-		packet[i/2] = b
-	}
-
-	log.Printf("=== 数据包分析 ===")
-	log.Printf("总长度: %d 字节", len(packet))
-
-	if len(packet) >= 14 {
-		log.Printf("目标MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-			packet[0], packet[1], packet[2], packet[3], packet[4], packet[5])
-		log.Printf("源MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-			packet[6], packet[7], packet[8], packet[9], packet[10], packet[11])
-
-		etherType := uint16(packet[12])<<8 | uint16(packet[13])
-		log.Printf("EtherType: 0x%04x", etherType)
-
-		if etherType == 0x0800 && len(packet) >= 34 {
-			log.Printf("IPv4包检测到")
-			log.Printf("源IP: %d.%d.%d.%d", packet[26], packet[27], packet[28], packet[29])
-			log.Printf("目标IP: %d.%d.%d.%d", packet[30], packet[31], packet[32], packet[33])
-		}
-	}
-	log.Printf("==================")
-}
-
-// analyzeTCPPacket 分析TCP包的详细信息
-func analyzeTCPPacket(packet []byte, direction string) {
-	if len(packet) < 54 { // 以太网14 + IP20 + TCP20
-		return
-	}
-
-	// 检查是否是IP包
-	etherType := uint16(packet[12])<<8 | uint16(packet[13])
-	if etherType != 0x0800 {
-		return
-	}
-
-	// 检查是否是TCP包
-	if packet[23] != 6 {
-		return
-	}
-
-	// 提取IP地址
-	srcIP := fmt.Sprintf("%d.%d.%d.%d", packet[26], packet[27], packet[28], packet[29])
-	dstIP := fmt.Sprintf("%d.%d.%d.%d", packet[30], packet[31], packet[32], packet[33])
-
-	// 提取TCP端口
-	srcPort := uint16(packet[34])<<8 | uint16(packet[35])
-	dstPort := uint16(packet[36])<<8 | uint16(packet[37])
-
-	// 提取TCP序列号和确认号
-	seqNum := uint32(packet[38])<<24 | uint32(packet[39])<<16 | uint32(packet[40])<<8 | uint32(packet[41])
-	ackNum := uint32(packet[42])<<24 | uint32(packet[43])<<16 | uint32(packet[44])<<8 | uint32(packet[45])
-
-	// 提取TCP标志
-	flags := packet[47]
-	flagStr := ""
-	if flags&0x02 != 0 {
-		flagStr += "SYN "
-	}
-	if flags&0x10 != 0 {
-		flagStr += "ACK "
-	}
-	if flags&0x01 != 0 {
-		flagStr += "FIN "
-	}
-	if flags&0x04 != 0 {
-		flagStr += "RST "
-	}
-	if flags&0x08 != 0 {
-		flagStr += "PSH "
-	}
-	if flags&0x20 != 0 {
-		flagStr += "URG "
-	}
-
-	log.Printf("[TCP-%s] %s:%d -> %s:%d, Seq=%d, Ack=%d, Flags=[%s]",
-		direction, srcIP, srcPort, dstIP, dstPort, seqNum, ackNum, strings.TrimSpace(flagStr))
 }
