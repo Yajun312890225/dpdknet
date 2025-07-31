@@ -5,6 +5,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,16 +15,17 @@ import (
 )
 
 var (
-	globalNetworkOnce  sync.Once
-	globalNetworkInit  bool
-	globalNetworkErr   error
-	globalTxFlow       *flow.Flow
-	globalSendCh       chan *packet.Packet
-	globalBytesCh      chan []byte                                       // 高性能字节发送通道
-	icmpHandlers       map[string]func([]byte, int, int, net.IP, net.IP) // ICMP处理器
-	localMAC           [6]uint8                                          // 本地网卡 MAC 地址
-	globalVXLANConfig  *VXLANConfig                                      // 全局 VXLAN 配置
-	globalVXLANHandler *VXLANHandler                                     // 全局 VXLAN 处理器
+	globalNetworkOnce     sync.Once
+	globalNetworkInit     bool
+	globalNetworkErr      error
+	globalTxFlow          *flow.Flow
+	globalSendCh          chan *packet.Packet
+	globalBytesCh         chan []byte                                       // 高性能字节发送通道
+	icmpHandlers          map[string]func([]byte, int, int, net.IP, net.IP) // ICMP处理器
+	localMAC              [6]uint8                                          // 本地网卡 MAC 地址
+	globalVXLANConfig     *VXLANConfig                                      // 全局 VXLAN 配置
+	globalVXLANHandler    *VXLANHandler                                     // 全局 VXLAN 处理器
+	globalPacketForwarder *PacketForwarder                                  // 全局数据包转发器
 )
 
 func init() {
@@ -123,6 +126,12 @@ func initializeGlobalNetwork() error {
 		return err
 	}
 
+	// 检查环境变量是否需要启动数据包转发器
+	if err := initializePacketForwarder(); err != nil {
+		log.Printf("[ERROR] Failed to initialize packet forwarder: %v", err)
+		return err
+	}
+
 	return nil
 }
 
@@ -176,6 +185,118 @@ func initializeVXLANNetworkStack() error {
 	return nil
 }
 
+// initializePacketForwarder 初始化数据包转发器
+func initializePacketForwarder() error {
+	// 检查环境变量是否启用数据包转发器
+	enableForwarder := os.Getenv("ENABLE_PACKET_FORWARDER")
+	if enableForwarder != "true" && enableForwarder != "1" {
+		log.Printf("[INFO] Packet forwarder disabled (ENABLE_PACKET_FORWARDER=%s)", enableForwarder)
+		return nil
+	}
+
+	// 获取网桥名称，默认为 br1
+	bridgeName := os.Getenv("FORWARDER_BRIDGE_NAME")
+	if bridgeName == "" {
+		bridgeName = "br1"
+	}
+
+	log.Printf("[INFO] Initializing packet forwarder with bridge: %s", bridgeName)
+
+	// 创建数据包转发器
+	forwarder, err := NewPacketForwarder(bridgeName)
+	if err != nil {
+		return fmt.Errorf("failed to create packet forwarder: %v", err)
+	}
+
+	// 添加默认过滤器
+	if err := setupDefaultFilters(forwarder); err != nil {
+		forwarder.Close()
+		return fmt.Errorf("failed to setup default filters: %v", err)
+	}
+	go func() {
+		// 启动转发器
+		if err := forwarder.Start(); err != nil {
+			forwarder.Close()
+			log.Printf("failed to start packet forwarder: %v", err)
+		}
+	}()
+
+	// 保存全局转发器引用
+	globalPacketForwarder = forwarder
+
+	log.Printf("[INFO] Packet forwarder started successfully")
+	log.Printf("  - Normal TAP device: %s", forwarder.GetNormalTapName())
+	// log.Printf("  - VXLAN TAP device: %s", forwarder.GetVXLANTapName())
+	log.Printf("  - Bridge: %s", forwarder.GetBridgeName())
+
+	return nil
+}
+
+// setupDefaultFilters 设置默认过滤器
+func setupDefaultFilters(forwarder *PacketForwarder) error {
+	// 1. VXLAN包过滤器 - 所有VXLAN包都自己处理
+	vxlanFilter := NewVXLANFilter("VXLAN过滤器", 66)
+	forwarder.AddFilter(vxlanFilter)
+
+	// 2. 从环境变量获取目标IP和网络
+	targetIPsEnv := os.Getenv("FORWARDER_TARGET_IPS")
+	targetNetworksEnv := os.Getenv("FORWARDER_TARGET_NETWORKS")
+
+	var targetIPs []string
+	var targetNetworks []string
+
+	if targetIPsEnv != "" {
+		targetIPs = strings.Split(targetIPsEnv, ",")
+		for i := range targetIPs {
+			targetIPs[i] = strings.TrimSpace(targetIPs[i])
+		}
+	}
+
+	if targetNetworksEnv != "" {
+		targetNetworks = strings.Split(targetNetworksEnv, ",")
+		for i := range targetNetworks {
+			targetNetworks[i] = strings.TrimSpace(targetNetworks[i])
+		}
+	}
+
+	// 如果有IP过滤配置，添加IP过滤器
+	if len(targetIPs) > 0 || len(targetNetworks) > 0 {
+		ipFilter := NewIPFilter("IP过滤器", targetIPs, targetNetworks)
+		forwarder.AddFilter(ipFilter)
+		log.Printf("[INFO] Added IP filter - IPs: %v, Networks: %v", targetIPs, targetNetworks)
+	}
+
+	// 3. 从环境变量获取目标端口
+	targetPortsEnv := os.Getenv("FORWARDER_TARGET_PORTS")
+	if targetPortsEnv != "" {
+		var targetPorts []uint16
+		portStrs := strings.Split(targetPortsEnv, ",")
+
+		for _, portStr := range portStrs {
+			portStr = strings.TrimSpace(portStr)
+			if port, err := strconv.ParseUint(portStr, 10, 16); err == nil {
+				targetPorts = append(targetPorts, uint16(port))
+			} else {
+				log.Printf("[WARN] Invalid port number: %s", portStr)
+			}
+		}
+
+		if len(targetPorts) > 0 {
+			portFilter := NewPortFilter("端口过滤器", targetPorts)
+			forwarder.AddFilter(portFilter)
+			log.Printf("[INFO] Added port filter - Ports: %v", targetPorts)
+		}
+	} else {
+		// 默认端口过滤器
+		defaultPorts := []uint16{4789, 22, 80, 443, 32333, 9999} // VXLAN, SSH, HTTP, HTTPS
+		portFilter := NewPortFilter("端口过滤器", defaultPorts)
+		forwarder.AddFilter(portFilter)
+		log.Printf("[INFO] Added default port filter - Ports: %v", defaultPorts)
+	}
+
+	return nil
+}
+
 // GetGlobalVXLANConfig 获取全局VXLAN配置
 func GetGlobalVXLANConfig() *VXLANConfig {
 	return globalVXLANConfig
@@ -201,7 +322,7 @@ func IsVXLANEnabled() bool {
 	return globalVXLANConfig != nil && globalVXLANHandler != nil
 }
 
-// globalPacketHandler 全局包处理器，优先通过 gVisor netstack 处理
+// globalPacketHandler 全局包处理器，按优先级处理数据包
 func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 	data := pkt.GetRawPacketBytes()
 
@@ -215,7 +336,7 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 		return
 	}
 
-	// 检查是否为 VXLAN 包
+	// 检查是否为 VXLAN 包 - VXLAN包有专门的处理逻辑，不走转发器
 	if IsVXLANPacket(data) {
 		// 先提取 VXLAN 内层数据
 		innerData := extractVXLANPayload(data)
@@ -246,7 +367,21 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 		return
 	}
 
-	// 首先尝试通过 gVisor netstack 处理
+	// 优先级1: 数据包转发器处理
+	if globalPacketForwarder != nil {
+		err := globalPacketForwarder.ProcessDPDKPacket(data)
+		if err == nil {
+			// 转发器成功处理，不再继续处理
+			return
+		} else if err != ErrNotHandled {
+			// 转发器处理错误（非"不处理"错误），记录日志并继续尝试gVisor
+			log.Printf("[WARN] Packet forwarder processing failed: %v", err)
+			// 不要return，继续到gVisor处理
+		}
+		// 如果是"不处理"错误或处理失败，继续到gVisor处理
+	}
+
+	// 优先级2: 通过 gVisor netstack 处理（转发器未处理的包）
 	if gvisor := GetGVisorNetstack(); gvisor != nil {
 		// 注入到 gVisor netstack 进行协议栈处理
 		gvisor.InjectDPDKPacket(data)
@@ -358,4 +493,19 @@ func extractVXLANPayload(data []byte) []byte {
 	}
 
 	return data[innerFrameStart:]
+}
+
+// GetGlobalPacketForwarder 获取全局数据包转发器
+func GetGlobalPacketForwarder() *PacketForwarder {
+	return globalPacketForwarder
+}
+
+// CleanupGlobalNetwork 清理全局网络资源
+func CleanupGlobalNetwork() {
+	if globalPacketForwarder != nil {
+		log.Printf("[INFO] Stopping global packet forwarder...")
+		globalPacketForwarder.Stop()
+		globalPacketForwarder.Close()
+		globalPacketForwarder = nil
+	}
 }

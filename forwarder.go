@@ -1,11 +1,15 @@
 package dpdknet
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
 	"sync"
 )
+
+// ErrNotHandled 表示转发器不处理该包
+var ErrNotHandled = errors.New("packet not handled by forwarder")
 
 // PacketForwarder 数据包转发器
 type PacketForwarder struct {
@@ -102,58 +106,36 @@ func (pf *PacketForwarder) ProcessDPDKPacket(packet []byte) error {
 	for _, filter := range pf.filters {
 		if filter.ShouldProcess(packet) {
 			shouldProcess = true
-			log.Printf("[Forwarder] 过滤器 %s 决定自己处理", filter.GetName())
+			log.Printf("[Forwarder] 过滤器 %s 决定转发到TAP", filter.GetName())
 			break
 		}
 	}
 	pf.mutex.RUnlock()
 
 	if shouldProcess {
-		// 自己处理这个包
-		return pf.handleLocalPacket(packet)
-	} else {
-		// 转发到TAP设备
-		return pf.forwardToTap(packet)
-	}
-}
-
-// handleLocalPacket 处理需要本地处理的数据包
-func (pf *PacketForwarder) handleLocalPacket(packet []byte) error {
-	log.Printf("[Forwarder] 本地处理数据包，长度: %d字节", len(packet))
-
-	// 这里可以调用相应的处理函数
-	// 例如VXLAN解封装、ARP处理等
-
-	// 检查是否是VXLAN包
-	if isVXLANPacket(packet) {
-		handleIncomingVXLANPacket(packet)
+		// 转发到TAP设备（仅非VXLAN包）
+		err := pf.forwardToTap(packet)
+		if err != nil {
+			// 转发过程中的其他错误
+			return err
+		}
+		// 转发成功，表示已处理
 		return nil
+	} else {
+		// 端口过滤器不匹配，让gVisor处理
+		return ErrNotHandled
 	}
-
-	// 检查是否是ARP包
-	if isARPPacket(packet) {
-		return pf.handleARPPacket(packet)
-	}
-
-	// 其他协议的处理...
-
-	return nil
 }
 
 // forwardToTap 转发数据包到TAP设备
 func (pf *PacketForwarder) forwardToTap(packet []byte) error {
+
 	pf.mutex.Lock()
 	pf.forwardedPackets++
 	pf.mutex.Unlock()
 
-	// 检查是否是VXLAN包，决定发送到哪个TAP
-	if isVXLANPacket(packet) {
-		log.Printf("[Forwarder] 转发VXLAN数据包到VXLAN TAP，长度: %d字节", len(packet))
-		return pf.tapManager.SendToVXLANTap(packet)
-	} else {
-		log.Printf("[Forwarder] 转发普通数据包到正常TAP，长度: %d字节", len(packet))
-		return pf.tapManager.SendToNormalTap(packet)
-	}
+	// log.Printf("[Forwarder] 转发数据包到normal TAP，长度: %d字节", len(packet))
+	return pf.tapManager.SendToNormalTap(packet)
 }
 
 // handleTapPacket 处理从TAP收到的数据包（这个方法现在由TapManager内部处理）
