@@ -10,6 +10,22 @@ import (
 	"github.com/songgao/water"
 )
 
+// 全局配置常量
+const (
+	// TAP设备固定MAC地址
+	TAP_NORMAL_MAC = "da:67:5d:00:d4:91"
+	TAP_VXLAN_MAC  = "da:67:5d:00:d4:92"
+
+	// 固定的目标IP地址
+	TARGET_IP = "172.16.1.1"
+
+	// DPDK网卡MAC地址
+	DPDK_MAC = "fe:ee:89:96:ac:a3"
+
+	// DPDK网卡IP地址
+	DPDK_IP = "171.213.255.230"
+)
+
 // TapDevice TAP 设备管理器，使用water库
 type TapDevice struct {
 	name      string
@@ -78,17 +94,17 @@ func NewTapManager(bridge string) (*TapManager, error) {
 	}
 	manager.normalTap = normalTap
 
-	// // 创建VXLAN数据TAP
-	// vxlanTap, err := NewTapDevice("tap-vxlan", bridge)
-	// if err != nil {
-	// 	normalTap.Close()
-	// 	return nil, fmt.Errorf("创建VXLAN数据TAP失败: %v", err)
-	// }
-	// manager.vxlanTap = vxlanTap
+	// 创建VXLAN数据TAP
+	vxlanTap, err := NewTapDevice("tap-vxlan", bridge)
+	if err != nil {
+		normalTap.Close()
+		return nil, fmt.Errorf("创建VXLAN数据TAP失败: %v", err)
+	}
+	manager.vxlanTap = vxlanTap
 
 	// 设置回调函数
 	normalTap.SetPacketHandler(manager.handleNormalPacket)
-	// vxlanTap.SetPacketHandler(manager.handleVXLANPacket)
+	vxlanTap.SetPacketHandler(manager.handleVXLANPacket)
 
 	log.Printf("[TAP] TAP管理器创建成功，绑定到网桥: %s", bridge)
 	return manager, nil
@@ -109,15 +125,22 @@ func (t *TapDevice) configure() error {
 		return fmt.Errorf("启动TAP接口失败: %v", err)
 	}
 
-	// 为TAP设备分配IP地址
-	// ipAddr := getTapIPAddress(t.name)
-	// if ipAddr != "" {
-	// 	if err := runCommand("ip", "addr", "add", ipAddr, "dev", t.name); err != nil {
-	// 		log.Printf("[TAP] 为TAP设备分配IP失败: %v", err)
-	// 	} else {
-	// 		log.Printf("[TAP] 为TAP设备分配IP成功: %s -> %s", t.name, ipAddr)
-	// 	}
-	// }
+	// 设置TAP设备的固定MAC地址
+	var tapMAC string
+	switch t.name {
+	case "tap-normal":
+		tapMAC = TAP_NORMAL_MAC
+	case "tap-vxlan":
+		tapMAC = TAP_VXLAN_MAC
+	default:
+		tapMAC = TAP_NORMAL_MAC // 默认使用normal MAC
+	}
+
+	if err := runCommand("ip", "link", "set", "dev", t.name, "address", tapMAC); err != nil {
+		log.Printf("[TAP] 设置TAP设备MAC地址失败: %v", err)
+	} else {
+		log.Printf("[TAP] 设置TAP设备MAC地址成功: %s -> %s", t.name, tapMAC)
+	}
 
 	// 添加到网桥
 	if err := runCommand("brctl", "addif", t.bridge, t.name); err != nil {
@@ -136,38 +159,6 @@ func (t *TapDevice) configure() error {
 	}
 
 	log.Printf("[TAP] TAP设备配置完成: %s -> %s", t.name, t.bridge)
-
-	// 配置路由，确保回包能正确路由
-	if err := t.configureRouting(); err != nil {
-		log.Printf("[TAP] 配置路由失败: %v", err)
-	}
-
-	return nil
-}
-
-// configureRouting 配置TAP设备路由
-func (t *TapDevice) configureRouting() error {
-	tapIP := t.GetTapIP()
-	if tapIP == "" {
-		return nil // 如果没有IP，跳过路由配置
-	}
-
-	// 添加本地路由，确保目标为172.16.1.1的包能路由到TAP设备
-	if err := runCommand("ip", "route", "add", "172.16.1.1/32", "dev", t.name); err != nil {
-		log.Printf("[TAP] 添加路由失败，可能已存在: %v", err)
-	} else {
-		log.Printf("[TAP] 添加路由成功: 172.16.1.1/32 -> %s", t.name)
-	}
-
-	// 启用IP转发
-	if err := runCommand("sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
-		log.Printf("[TAP] 启用IP转发失败: %v", err)
-	}
-
-	// 禁用反向路径过滤，避免包被丢弃
-	if err := runCommand("sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", t.name)); err != nil {
-		log.Printf("[TAP] 禁用反向路径过滤失败: %v", err)
-	}
 
 	return nil
 }
@@ -294,16 +285,6 @@ func (t *TapDevice) SendPacket(packet []byte) error {
 func (t *TapDevice) Close() error {
 	t.Stop()
 
-	// 清理IP地址配置
-	// ipAddr := getTapIPAddress(t.name)
-	// if ipAddr != "" {
-	// 	if err := runCommand("ip", "addr", "del", ipAddr, "dev", t.name); err != nil {
-	// 		log.Printf("[TAP] 清理TAP设备IP失败: %v", err)
-	// 	} else {
-	// 		log.Printf("[TAP] 清理TAP设备IP成功: %s -> %s", t.name, ipAddr)
-	// 	}
-	// }
-
 	if t.iface != nil {
 		return t.iface.Close()
 	}
@@ -330,10 +311,10 @@ func (tm *TapManager) Start() error {
 		return fmt.Errorf("启动正常TAP失败: %v", err)
 	}
 
-	// if err := tm.vxlanTap.Start(); err != nil {
-	// 	tm.normalTap.Stop()
-	// 	return fmt.Errorf("启动VXLAN TAP失败: %v", err)
-	// }
+	if err := tm.vxlanTap.Start(); err != nil {
+		tm.normalTap.Stop()
+		return fmt.Errorf("启动VXLAN TAP失败: %v", err)
+	}
 
 	log.Printf("[TAP] TAP管理器启动成功")
 	return nil
@@ -400,19 +381,6 @@ func (tm *TapManager) GetBridgeName() string {
 	return tm.bridge
 }
 
-// GetNormalTapIP 获取正常TAP设备的IP地址
-func (tm *TapManager) GetNormalTapIP() string {
-	return tm.normalTap.GetTapIP()
-}
-
-// GetVXLANTapIP 获取VXLAN TAP设备的IP地址
-func (tm *TapManager) GetVXLANTapIP() string {
-	if tm.vxlanTap == nil {
-		return ""
-	}
-	return tm.vxlanTap.GetTapIP()
-}
-
 // GetTapStats 获取TAP设备统计信息
 func (tm *TapManager) GetTapStats() (normalRx, normalTx, vxlanRx, vxlanTx uint64) {
 	normalRx, normalTx = tm.normalTap.GetStats()
@@ -420,6 +388,77 @@ func (tm *TapManager) GetTapStats() (normalRx, normalTx, vxlanRx, vxlanTx uint64
 		vxlanRx, vxlanTx = tm.vxlanTap.GetStats()
 	}
 	return
+}
+
+// modifyReturnPacketHeaders 修改回包的源IP和源MAC为DPDK的地址
+func (tm *TapManager) modifyReturnPacketHeaders(packet []byte) []byte {
+	// 检查包长度是否足够 (以太网头14字节)
+	if len(packet) < 14 {
+		log.Printf("[TAP] 回包太短，无法修改头部: %d字节", len(packet))
+		return packet
+	}
+
+	// 复制原始包
+	modifiedPacket := make([]byte, len(packet))
+	copy(modifiedPacket, packet)
+
+	// 获取原始地址信息用于日志
+	originalSrcMAC := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
+		packet[6], packet[7], packet[8], packet[9], packet[10], packet[11])
+	originalDstMAC := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
+		packet[0], packet[1], packet[2], packet[3], packet[4], packet[5])
+
+	copy(modifiedPacket[6:12], localMAC[:])
+
+	// // 将目标MAC改为DPDK网卡的MAC（因为要发送给DPDK网卡）
+	// dpdkMAC := parseMACAddress(DPDK_MAC)
+	// if dpdkMAC != nil {
+	// 	copy(modifiedPacket[0:6], dpdkMAC)
+	// }
+
+	// 检查是否是IP包并修改IP地址
+	etherType := uint16(packet[12])<<8 | uint16(packet[13])
+	if etherType == 0x0800 && len(packet) >= 34 {
+		ipOffset := 14
+
+		// 获取原始IP地址
+		originalSrcIP := fmt.Sprintf("%d.%d.%d.%d", packet[ipOffset+12], packet[ipOffset+13], packet[ipOffset+14], packet[ipOffset+15])
+		originalDstIP := fmt.Sprintf("%d.%d.%d.%d", packet[ipOffset+16], packet[ipOffset+17], packet[ipOffset+18], packet[ipOffset+19])
+
+		// 对于从TAP返回的包，我们需要：
+		// 1. 将源IP从172.16.1.1改为192.168.66.57（原始目标服务器IP）
+		// 2. 保持目标IP为171.213.255.230（原始客户端IP）
+
+		// 将源IP改为原始的目标服务器IP
+		originalServerIP := parseIPAddress("192.168.66.57")
+		if originalServerIP != nil {
+			copy(modifiedPacket[ipOffset+12:ipOffset+16], originalServerIP)
+		}
+
+		// 目标IP保持不变，应该是171.213.255.230
+
+		// 重新计算IP头校验和
+		if err := updateIPChecksumAtOffset(modifiedPacket, ipOffset); err != nil {
+			log.Printf("[TAP] 更新回包IP校验和失败: %v", err)
+		}
+
+		// 重新计算TCP校验和（如果是TCP包）
+		if packet[ipOffset+9] == 6 && len(modifiedPacket) >= ipOffset+40 { // TCP协议
+			if err := updateTCPChecksumAtOffset(modifiedPacket, ipOffset); err != nil {
+				log.Printf("[TAP] 更新回包TCP校验和失败: %v", err)
+			}
+		}
+
+		log.Printf("[TAP] 修改回包头部: 目标MAC %s->%s, 源MAC %s->%s, 源IP %s->%s, 目标IP %s(保持不变)",
+			originalDstMAC, fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
+				localMAC[0], localMAC[1], localMAC[2], localMAC[3], localMAC[4], localMAC[5]), originalSrcMAC, TAP_NORMAL_MAC, originalSrcIP, "192.168.66.57", originalDstIP)
+	} else {
+		log.Printf("[TAP] 修改回包MAC: 目标MAC %s->%s, 源MAC %s->%s",
+			originalDstMAC, fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
+				packet[6], packet[7], packet[8], packet[9], packet[10], packet[11]), originalSrcMAC, TAP_NORMAL_MAC)
+	}
+
+	return modifiedPacket
 }
 
 // handleNormalPacket 处理来自正常TAP的数据包
@@ -453,8 +492,11 @@ func (tm *TapManager) handleNormalPacket(packet []byte) error {
 		}
 	}
 
-	// 将数据包发送到DPDK
-	return SendRawBytes(packet)
+	// 修改回包的源IP和源MAC为DPDK的地址
+	modifiedPacket := tm.modifyReturnPacketHeaders(packet)
+
+	// 将修改后的数据包发送到DPDK
+	return SendRawBytes(modifiedPacket)
 }
 
 // handleVXLANPacket 处理来自VXLAN TAP的数据包
@@ -503,10 +545,19 @@ func (t *TapDevice) GetTapIP() string {
 
 // modifyPacketHeaders 修改数据包的目标MAC和IP地址
 func (t *TapDevice) modifyPacketHeaders(packet []byte) ([]byte, error) {
-	// 固定目标IP地址为172.16.1.1
-	targetIP := "172.16.1.1"
-	// 固定目标MAC地址为aa:c3:49:f5:a4:33
-	targetMAC := []byte{0xaa, 0xc3, 0x49, 0xf5, 0xa4, 0x33}
+	// 使用固定的目标IP地址
+	targetIP := TARGET_IP
+
+	// 获取TAP设备对应的MAC地址
+	var targetMAC []byte
+	switch t.name {
+	case "tap-normal":
+		targetMAC = parseMACAddress(TAP_NORMAL_MAC)
+	case "tap-vxlan":
+		targetMAC = parseMACAddress(TAP_VXLAN_MAC)
+	default:
+		targetMAC = parseMACAddress(TAP_NORMAL_MAC)
+	}
 
 	// 检查包长度是否足够 (以太网头14字节)
 	if len(packet) < 14 {
@@ -569,11 +620,11 @@ func (t *TapDevice) modifyPacketHeaders(packet []byte) ([]byte, error) {
 			}
 		}
 
-		log.Printf("[TAP] 修改数据包头: MAC %s->aa:c3:49:f5:a4:33, IP %s->%s (TAP: %s)",
-			originalDestMAC, originalDestIP, targetIP, t.name)
+		log.Printf("[TAP] 修改数据包头: MAC %s->%s, IP %s->%s (TAP: %s)",
+			originalDestMAC, getTapMACByName(t.name), originalDestIP, targetIP, t.name)
 	} else {
-		log.Printf("[TAP] 修改目标MAC地址: %s->aa:c3:49:f5:a4:33 (未找到IP头, TAP: %s)",
-			originalDestMAC, t.name)
+		log.Printf("[TAP] 修改目标MAC地址: %s->%s (未找到IP头, TAP: %s)",
+			originalDestMAC, getTapMACByName(t.name), t.name)
 	}
 
 	return modifiedPacket, nil
@@ -629,6 +680,47 @@ func parseIPAddress(ipStr string) []byte {
 		ip[i] = byte(val)
 	}
 	return ip
+}
+
+// parseMACAddress 解析MAC地址字符串为字节数组
+func parseMACAddress(macStr string) []byte {
+	parts := strings.Split(macStr, ":")
+	if len(parts) != 6 {
+		return nil
+	}
+
+	mac := make([]byte, 6)
+	for i, part := range parts {
+		val := 0
+		for _, c := range part {
+			if c >= '0' && c <= '9' {
+				val = val*16 + int(c-'0')
+			} else if c >= 'a' && c <= 'f' {
+				val = val*16 + int(c-'a'+10)
+			} else if c >= 'A' && c <= 'F' {
+				val = val*16 + int(c-'A'+10)
+			} else {
+				return nil
+			}
+		}
+		if val > 255 {
+			return nil
+		}
+		mac[i] = byte(val)
+	}
+	return mac
+}
+
+// getTapMACByName 根据TAP设备名称获取对应的MAC地址字符串
+func getTapMACByName(tapName string) string {
+	switch tapName {
+	case "tap-normal":
+		return TAP_NORMAL_MAC
+	case "tap-vxlan":
+		return TAP_VXLAN_MAC
+	default:
+		return TAP_NORMAL_MAC
+	}
 }
 
 // getDestinationIP 获取数据包的目标IP地址
