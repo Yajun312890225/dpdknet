@@ -95,16 +95,29 @@ func (pf *PacketForwarder) AddFilter(filter PacketFilter) {
 
 // ProcessDPDKPacket 处理从DPDK收到的数据包
 func (pf *PacketForwarder) ProcessDPDKPacket(packet []byte) error {
+
 	pf.mutex.Lock()
 	pf.processedPackets++
 	pf.mutex.Unlock()
 
-	// 应用所有过滤器
+	// 打印DPDK收到的包的详细信息
+	pf.printPacketInfo(packet, "DPDK收到")
+
+	// 首先检查是否是从TAP设备返回的包
+	if pf.isPacketFromTap(packet) {
+		log.Printf("[Forwarder] 检测到从TAP返回的包，长度: %d字节，直接让网络栈处理", len(packet))
+		// 这是从TAP返回的包，说明已经被TAP处理过了，现在要发出去
+		// 直接返回，让网络栈处理，因为这些包已经被TAP修改过MAC和IP
+		return ErrNotHandled
+	}
+
+	// 应用所有过滤器检查是否需要转发到TAP
 	shouldProcess := false
 
 	pf.mutex.RLock()
 	for _, filter := range pf.filters {
 		if filter.ShouldProcess(packet) {
+			log.Printf("[Forwarder] 过滤器 %s 匹配，转发到TAP", filter.GetName())
 			shouldProcess = true
 			break
 		}
@@ -112,7 +125,8 @@ func (pf *PacketForwarder) ProcessDPDKPacket(packet []byte) error {
 	pf.mutex.RUnlock()
 
 	if shouldProcess {
-		// 转发到TAP设备（仅非VXLAN包）
+		log.Printf("[Forwarder] 转发包到TAP处理，长度: %d字节", len(packet))
+		// 转发到TAP设备（仅匹配过滤器的包）
 		err := pf.forwardToTap(packet)
 		if err != nil {
 			// 转发过程中的其他错误
@@ -121,7 +135,8 @@ func (pf *PacketForwarder) ProcessDPDKPacket(packet []byte) error {
 		// 转发成功，表示已处理
 		return nil
 	} else {
-		// 端口过滤器不匹配，让gVisor处理
+		log.Printf("[Forwarder] 无过滤器匹配，让gVisor处理")
+		// 过滤器不匹配，让gVisor处理
 		return ErrNotHandled
 	}
 }
@@ -135,6 +150,130 @@ func (pf *PacketForwarder) forwardToTap(packet []byte) error {
 
 	// log.Printf("[Forwarder] 转发数据包到normal TAP，长度: %d字节", len(packet))
 	return pf.tapManager.SendToNormalTap(packet)
+}
+
+// isPacketFromTap 检查数据包是否来自TAP设备
+func (pf *PacketForwarder) isPacketFromTap(packet []byte) bool {
+	// 检查包长度是否足够
+	if len(packet) < 14 {
+		return false
+	}
+
+	// 获取MAC地址信息
+	dstMAC := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
+		packet[0], packet[1], packet[2], packet[3], packet[4], packet[5])
+	srcMAC := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
+		packet[6], packet[7], packet[8], packet[9], packet[10], packet[11])
+
+	// 方法1: 检查源MAC地址是否是TAP设备的MAC（发出的包）
+	if srcMAC == TAP_NORMAL_MAC || srcMAC == TAP_VXLAN_MAC {
+		log.Printf("[Forwarder] 通过源MAC识别TAP发出的包: %s", srcMAC)
+		return true
+	}
+
+	// 方法2: 检查源MAC是否是OUTMAC（这是回包的特征）
+	if srcMAC == OUTMAC {
+		log.Printf("[Forwarder] 通过源MAC识别回包（源MAC=OUTMAC）: %s", srcMAC)
+		return true
+	}
+
+	// 方法3: 检查目标MAC是否是外网网关MAC（OUTMAC）- 发往公网的包
+	if dstMAC == OUTMAC {
+		log.Printf("[Forwarder] 通过目标MAC识别发往公网的包: %s", dstMAC)
+		return true
+	}
+
+	// 方法4: 检查源IP地址是否是本地IP（TAP修改后的发出包）
+	if len(packet) >= 34 {
+		// 检查是否是IP包
+		etherType := uint16(packet[12])<<8 | uint16(packet[13])
+		if etherType == 0x0800 {
+			// 获取源IP和目标IP
+			srcIP := fmt.Sprintf("%d.%d.%d.%d", packet[26], packet[27], packet[28], packet[29])
+			dstIP := fmt.Sprintf("%d.%d.%d.%d", packet[30], packet[31], packet[32], packet[33])
+			localIP := getLocalIPFromEnv().String()
+
+			// 如果源IP是本地IP，说明这是从TAP发出的包
+			if srcIP == localIP {
+				log.Printf("[Forwarder] 通过源IP识别TAP发出的包: %s (本地IP: %s)", srcIP, localIP)
+				return true
+			}
+
+			// 如果目标IP是本地IP，说明这是回包
+			if dstIP == localIP {
+				log.Printf("[Forwarder] 通过目标IP识别回包: 目标IP=%s (本地IP: %s)", dstIP, localIP)
+				return true
+			}
+		}
+	}
+
+	return false
+} // printPacketInfo 打印数据包的详细信息
+func (pf *PacketForwarder) printPacketInfo(packet []byte, prefix string) {
+	if len(packet) < 14 {
+		log.Printf("[%s] 包太短: %d字节", prefix, len(packet))
+		return
+	}
+
+	// 基本以太网头信息
+	dstMAC := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
+		packet[0], packet[1], packet[2], packet[3], packet[4], packet[5])
+	srcMAC := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
+		packet[6], packet[7], packet[8], packet[9], packet[10], packet[11])
+	etherType := uint16(packet[12])<<8 | uint16(packet[13])
+
+	log.Printf("[%s] 以太网头: 长度=%d, 目标MAC=%s, 源MAC=%s, 类型=0x%04x",
+		prefix, len(packet), dstMAC, srcMAC, etherType)
+
+	// 如果是IP包，打印IP信息
+	if etherType == 0x0800 && len(packet) >= 34 {
+		protocol := packet[23]
+		srcIP := fmt.Sprintf("%d.%d.%d.%d", packet[26], packet[27], packet[28], packet[29])
+		dstIP := fmt.Sprintf("%d.%d.%d.%d", packet[30], packet[31], packet[32], packet[33])
+
+		protocolName := "Unknown"
+		switch protocol {
+		case 6:
+			protocolName = "TCP"
+		case 17:
+			protocolName = "UDP"
+		case 1:
+			protocolName = "ICMP"
+		}
+
+		log.Printf("[%s] IP头: 协议=%s(%d), 源IP=%s, 目标IP=%s",
+			prefix, protocolName, protocol, srcIP, dstIP)
+
+		// 如果是TCP/UDP，打印端口信息
+		if (protocol == 6 || protocol == 17) && len(packet) >= 38 {
+			srcPort := uint16(packet[34])<<8 | uint16(packet[35])
+			dstPort := uint16(packet[36])<<8 | uint16(packet[37])
+			log.Printf("[%s] 端口: 源端口=%d, 目标端口=%d", prefix, srcPort, dstPort)
+		}
+	} else if etherType == 0x0806 {
+		log.Printf("[%s] ARP包", prefix)
+	}
+
+	// 打印前64字节的十六进制内容
+	hexLen := len(packet)
+	if hexLen > 64 {
+		hexLen = 64
+	}
+
+	hexStr := ""
+	for i := 0; i < hexLen; i++ {
+		hexStr += fmt.Sprintf("%02x", packet[i])
+		if (i+1)%16 == 0 {
+			hexStr += "\n                    "
+		} else if (i+1)%2 == 0 {
+			hexStr += " "
+		}
+	}
+	if len(packet) > 64 {
+		hexStr += "..."
+	}
+
+	log.Printf("[%s] 十六进制: %s", prefix, hexStr)
 }
 
 // handleTapPacket 处理从TAP收到的数据包（这个方法现在由TapManager内部处理）
