@@ -350,8 +350,8 @@ func (tm *TapManager) GetTapStats() (normalRx, normalTx, vxlanRx, vxlanTx uint64
 	return
 }
 
-// modifyReturnPacketHeaders 修改回包的源IP和源MAC为DPDK的地址
-func (tm *TapManager) modifyReturnPacketHeaders(packet []byte) []byte {
+// modifyPacketHeaders 修改回包的源IP和源MAC为DPDK的地址
+func (tm *TapManager) modifyPacketHeaders(packet []byte) []byte {
 	// 检查包长度是否足够 (以太网头14字节)
 	if len(packet) < 14 {
 		log.Printf("[TAP] 回包太短，无法修改头部: %d字节", len(packet))
@@ -368,7 +368,6 @@ func (tm *TapManager) modifyReturnPacketHeaders(packet []byte) []byte {
 	etherType := uint16(packet[12])<<8 | uint16(packet[13])
 	if etherType == 0x0800 && len(packet) >= 34 {
 		ipOffset := 14
-
 		// 将源IP改为原始的目标服务器IP
 		copy(modifiedPacket[ipOffset+12:ipOffset+16], getLocalIP().To4())
 
@@ -384,50 +383,6 @@ func (tm *TapManager) modifyReturnPacketHeaders(packet []byte) []byte {
 			if err := updateTCPChecksumAtOffset(modifiedPacket, ipOffset); err != nil {
 				log.Printf("[TAP] 更新回包TCP校验和失败: %v", err)
 			}
-		}
-	}
-
-	return modifiedPacket
-}
-
-// modifyOutgoingPacketHeaders 修改发出包的源IP和源MAC为DPDK的地址
-func (tm *TapManager) modifyOutgoingPacketHeaders(packet []byte) []byte {
-	// 检查包长度是否足够 (以太网头14字节)
-	if len(packet) < 14 {
-		return packet
-	}
-
-	// 复制原始包
-	modifiedPacket := make([]byte, len(packet))
-	copy(modifiedPacket, packet)
-
-	// 设置目标MAC为外网网关或下一跳的MAC地址（用于发送到公网）
-	outMAC := getGatewayMAC()
-	if outMAC != nil {
-		copy(modifiedPacket[0:6], outMAC)
-	}
-
-	// 设置源MAC为DPDK网卡的MAC地址（表示从DPDK网卡发出）
-	copy(modifiedPacket[6:12], localMAC[:])
-
-	// 检查是否是IP包并修改IP地址
-	etherType := uint16(packet[12])<<8 | uint16(packet[13])
-	if etherType == 0x0800 && len(packet) >= 34 {
-		ipOffset := 14
-
-		// 将源IP改为DPDK网卡的IP（从DPDK网卡发出）
-		dpdkIP := getLocalIP().To4()
-		if dpdkIP != nil {
-			copy(modifiedPacket[ipOffset+12:ipOffset+16], dpdkIP)
-		}
-
-		// 重新计算IP头校验和
-		if err := updateIPChecksumAtOffset(modifiedPacket, ipOffset); err != nil {
-			log.Printf("[TAP] 更新发出包IP校验和失败: %v", err)
-		}
-
-		// 重新计算TCP校验和（如果是TCP包）
-		if packet[ipOffset+9] == 6 && len(modifiedPacket) >= ipOffset+40 { // TCP协议
 		}
 	}
 
@@ -487,7 +442,6 @@ func (tm *TapManager) handleNormalPacket(packet []byte) error {
 	if len(packet) < 14 {
 		return SendRawBytes(packet)
 	}
-
 	// 检查EtherType
 	etherType := uint16(packet[12])<<8 | uint16(packet[13])
 
@@ -499,21 +453,10 @@ func (tm *TapManager) handleNormalPacket(packet []byte) error {
 			return globalARPHandler.HandleARPPacketWithConfig(packet, TAP_NORMAL_IP, TAP_NORMAL_MAC, tm)
 		}
 	}
-
 	// 处理IP包 (EtherType = 0x0800)
 	if etherType == 0x0800 && len(packet) >= 34 {
-		// 获取目标IP
-		dstIP := fmt.Sprintf("%d.%d.%d.%d", packet[30], packet[31], packet[32], packet[33])
-		localIP := getLocalIP().String()
-		// 如果目标IP是本地IP，这是一个回包（从服务器返回给客户端）
-		if dstIP == localIP {
-			modifiedPacket := tm.modifyReturnPacketHeaders(packet)
-			return SendRawBytes(modifiedPacket)
-		} else {
-			// 如果目标IP不是本地IP，这是一个要发出去的包（从客户端发给服务器）
-			modifiedPacket := tm.modifyOutgoingPacketHeaders(packet)
-			return SendRawBytes(modifiedPacket)
-		}
+		modifiedPacket := tm.modifyPacketHeaders(packet)
+		return SendRawBytes(modifiedPacket)
 	}
 
 	return SendRawBytes(packet)
