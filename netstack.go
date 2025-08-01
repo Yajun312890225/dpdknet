@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -335,22 +334,6 @@ func (gvs *GVisorNetstack) processDPDKPacket(data []byte) {
 		return
 	}
 
-	// 检查是否是VXLAN包
-	if gvs.isVXLANPacket(ipPacket) {
-		// 尝试VXLAN解封装
-		innerPacket, err := gvs.decapsulateVXLANPacket(ipPacket)
-		if err != nil {
-			gvs.stats.PacketsDropped++
-			return
-		}
-
-		if innerPacket != nil {
-			// 递归处理内层包
-			gvs.processInnerPacket(innerPacket)
-			return
-		}
-	}
-
 	// 创建 buffer 并注入到 gVisor netstack
 	var buf buffer.Buffer
 	view := buffer.NewViewWithData(ipPacket)
@@ -373,25 +356,7 @@ func (gvs *GVisorNetstack) sendPacketToDPDK(pkt *stack.PacketBuffer) {
 	payload := pkt.ToBuffer()
 	totalSize := payload.Size() + 14 // 以太网头部 14 字节
 
-	// 早期检测
 	payloadBytes := payload.Flatten()
-	if len(payloadBytes) >= 20 {
-		protocol := payloadBytes[9]
-		if protocol == 6 { // TCP
-			ipHeaderLen := (payloadBytes[0] & 0x0F) * 4
-			if len(payloadBytes) >= int(ipHeaderLen)+14 {
-				tcpFlags := payloadBytes[ipHeaderLen+13]
-				if tcpFlags&0x01 != 0 { // FIN包 - 保留关键日志
-					srcIP := net.IP(payloadBytes[12:16])
-					dstIP := net.IP(payloadBytes[16:20])
-					srcPort := uint16(payloadBytes[ipHeaderLen])<<8 | uint16(payloadBytes[ipHeaderLen+1])
-					dstPort := uint16(payloadBytes[ipHeaderLen+2])<<8 | uint16(payloadBytes[ipHeaderLen+3])
-					log.Printf("[TCP_FIN] Sending FIN: %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
-				}
-			}
-		}
-	}
-
 	// 构建完整的以太网帧
 	frame := make([]byte, totalSize)
 
@@ -552,13 +517,6 @@ func (gvs *GVisorNetstack) handleVXLANOutgoingPacket(frame []byte, vxlanConfig *
 	}
 
 	return nil
-}
-
-// getRemoteVTEPForDestination 获取目标 IP 对应的远程 VTEP
-func getRemoteVTEPForDestination(dstIP net.IP) net.IP {
-	// 这里需要实现 VTEP 映射逻辑
-	// 简化实现，可以从环境变量或配置文件获取
-	return net.ParseIP(os.Getenv("REMOTE_VTEP_IP"))
 }
 
 // CreateTCPListener 创建 TCP 监听器
@@ -862,200 +820,4 @@ func CreateGVisorTCPConnWithLocalAddr(localIP net.IP, localPort uint16, remoteAd
 		return nil, fmt.Errorf("gVisor netstack not initialized")
 	}
 	return gvs.CreateTCPConnWithLocalAddr(localIP, localPort, remoteAddr)
-}
-
-// ProcessDPDKPacket 处理来自 DPDK 的数据包（全局入口）
-func ProcessDPDKPacket(data []byte) error {
-	gvs := GetGVisorNetstack()
-	if gvs == nil {
-		return fmt.Errorf("gVisor netstack not initialized")
-	}
-
-	gvs.InjectDPDKPacket(data)
-	return nil
-}
-
-// GetNetworkStats 获取网络统计信息
-func GetNetworkStats() *GVisorStats {
-	gvs := GetGVisorNetstack()
-	if gvs == nil {
-		return nil
-	}
-
-	stats := gvs.GetStats()
-	return &stats
-}
-
-// SetPacketHandler 设置数据包处理器（可选，用于自定义处理）
-func (gvs *GVisorNetstack) SetPacketHandler(handler func([]byte) error) {
-	gvs.mu.Lock()
-	defer gvs.mu.Unlock()
-	gvs.packetHandler = handler
-}
-
-// isVXLANPacket 检查UDP包是否是VXLAN包（目标端口4789）
-func (gvs *GVisorNetstack) isVXLANPacket(ipPacket []byte) bool {
-	if len(ipPacket) < 20 {
-		return false
-	}
-
-	// 确保是UDP协议
-	protocol := ipPacket[9]
-	if protocol != 17 { // UDP
-		return false
-	}
-
-	ipHeaderLen := (ipPacket[0] & 0x0F) * 4
-	if len(ipPacket) < int(ipHeaderLen)+8 { // UDP头部8字节
-		return false
-	}
-
-	// 检查目标端口是否是4789（VXLAN标准端口）
-	srcPort := uint16(ipPacket[ipHeaderLen])<<8 | uint16(ipPacket[ipHeaderLen+1])
-	dstPort := uint16(ipPacket[ipHeaderLen+2])<<8 | uint16(ipPacket[ipHeaderLen+3])
-
-	isVXLAN := dstPort == 4789
-	if isVXLAN {
-		srcIP := net.IP(ipPacket[12:16])
-		dstIP := net.IP(ipPacket[16:20])
-		log.Printf("[VXLAN_INBOUND_DEBUG] 🔍 Detected incoming VXLAN packet")
-		log.Printf("[VXLAN_INBOUND_DEBUG]   Outer: %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
-		log.Printf("[VXLAN_INBOUND_DEBUG]   UDP payload size: %d bytes", len(ipPacket)-int(ipHeaderLen)-8)
-	}
-	return isVXLAN
-} // decapsulateVXLANPacket 解封装VXLAN数据包
-func (gvs *GVisorNetstack) decapsulateVXLANPacket(ipPacket []byte) ([]byte, error) {
-	// 获取全局VXLAN处理器
-	handler := GetGlobalVXLANHandler()
-	if handler == nil {
-		log.Printf("[VXLAN_INBOUND_ERROR] No global VXLAN handler available")
-		return nil, fmt.Errorf("no global VXLAN handler available")
-	}
-
-	log.Printf("[VXLAN_INBOUND_DEBUG] 🔧 Starting VXLAN decapsulation...")
-
-	// 使用VXLAN处理器解封装
-	innerPayload, innerSrcIP, innerDstIP, innerSrcPort, innerDstPort, protocol, vni, err := handler.DecapsulateVXLAN(ipPacket)
-	if err != nil {
-		log.Printf("[VXLAN_INBOUND_ERROR] VXLAN decapsulation failed: %v", err)
-		return nil, fmt.Errorf("VXLAN decapsulation failed: %v", err)
-	}
-
-	log.Printf("[VXLAN_INBOUND_DEBUG] ✅ VXLAN decapsulation successful!")
-	log.Printf("[VXLAN_INBOUND_DEBUG]   VNI: %d", vni)
-	log.Printf("[VXLAN_INBOUND_DEBUG]   Inner packet: %s:%d -> %s:%d", innerSrcIP, innerSrcPort, innerDstIP, innerDstPort)
-	log.Printf("[VXLAN_INBOUND_DEBUG]   Protocol: %s", protocol)
-	log.Printf("[VXLAN_INBOUND_DEBUG]   Payload size: %d bytes", len(innerPayload))
-
-	return innerPayload, nil
-}
-
-// processInnerPacket 处理解封装后的内层数据包
-func (gvs *GVisorNetstack) processInnerPacket(innerPacket []byte) {
-	if len(innerPacket) < 20 {
-		log.Printf("[VXLAN_INBOUND_ERROR] Inner packet too short: %d bytes", len(innerPacket))
-		gvs.stats.PacketsDropped++
-		return
-	}
-
-	// 解析内层包信息
-	srcIP := net.IP(innerPacket[12:16])
-	dstIP := net.IP(innerPacket[16:20])
-	protocol := innerPacket[9]
-
-	log.Printf("[VXLAN_INBOUND_DEBUG] 📦 Processing inner packet:")
-	log.Printf("[VXLAN_INBOUND_DEBUG]   SrcIP: %s -> DstIP: %s", srcIP, dstIP)
-	log.Printf("[VXLAN_INBOUND_DEBUG]   Protocol: %d", protocol)
-
-	// 如果是 TCP 包，打印端口信息
-	if protocol == 6 && len(innerPacket) >= 24 {
-		ipHeaderLen := (innerPacket[0] & 0x0F) * 4
-		if len(innerPacket) >= int(ipHeaderLen)+4 {
-			srcPort := uint16(innerPacket[ipHeaderLen])<<8 | uint16(innerPacket[ipHeaderLen+1])
-			dstPort := uint16(innerPacket[ipHeaderLen+2])<<8 | uint16(innerPacket[ipHeaderLen+3])
-			log.Printf("[VXLAN_INBOUND_DEBUG]   TCP: %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
-
-			// 检查 TCP 标志位
-			tcpFlags := innerPacket[ipHeaderLen+13]
-			flagStr := ""
-			if tcpFlags&0x02 != 0 {
-				flagStr += "SYN "
-			}
-			if tcpFlags&0x10 != 0 {
-				flagStr += "ACK "
-			}
-			if tcpFlags&0x01 != 0 {
-				flagStr += "FIN "
-			}
-			if tcpFlags&0x04 != 0 {
-				flagStr += "RST "
-			}
-			if tcpFlags&0x08 != 0 {
-				flagStr += "PSH "
-			}
-			log.Printf("[VXLAN_INBOUND_DEBUG]   TCP Flags: %s", flagStr)
-
-			// 特别关注 FIN 包
-			if tcpFlags&0x01 != 0 {
-				log.Printf("[TCP_FIN_DEBUG] 🔚 FIN packet detected in VXLAN: %s:%d -> %s:%d", srcIP, srcPort, dstIP, dstPort)
-			}
-		}
-	}
-
-	// 检查目标IP是否是我们的虚拟IP
-	if gvs.isOurVirtualIP(dstIP) {
-		log.Printf("[VXLAN_INBOUND_DEBUG] ✅ Inner packet destined for our virtual IP: %s", dstIP)
-
-		// 创建buffer并注入到gVisor协议栈
-		var buf buffer.Buffer
-		view := buffer.NewViewWithData(innerPacket)
-		buf.Append(view)
-
-		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-			Payload: buf,
-		})
-
-		// 注入到网络协议栈
-		gvs.linkEP.InjectInbound(header.IPv4ProtocolNumber, pkt)
-		pkt.DecRef()
-
-		gvs.stats.PacketsProcessed++
-		log.Printf("[VXLAN_INBOUND_DEBUG] ✅ Inner packet successfully injected into gVisor")
-	} else {
-		log.Printf("[VXLAN_INBOUND_DEBUG] ❌ Inner packet not for us, dropping. Dest IP: %s", dstIP)
-		log.Printf("[VXLAN_INBOUND_DEBUG] Our configured IPs:")
-
-		// 显示我们配置的所有IP地址
-		addrs := gvs.stack.AllAddresses()
-		for nicID, nicAddrs := range addrs {
-			if nicID == defaultNICID {
-				for i, addr := range nicAddrs {
-					log.Printf("[VXLAN_INBOUND_DEBUG]   IP %d: %s", i, addr.AddressWithPrefix.Address)
-				}
-			}
-		}
-		gvs.stats.PacketsDropped++
-	}
-}
-
-// isOurVirtualIP 检查IP地址是否是我们配置的虚拟IP
-func (gvs *GVisorNetstack) isOurVirtualIP(ip net.IP) bool {
-	// 检查是否是主IP
-	if ip.Equal(gvs.localIP) {
-		return true
-	}
-
-	// 检查是否是配置的虚拟IP
-	addrs := gvs.stack.AllAddresses()
-	for nicID, nicAddrs := range addrs {
-		if nicID == defaultNICID {
-			for _, addr := range nicAddrs {
-				if addr.AddressWithPrefix.Address == tcpip.AddrFromSlice(ip.To4()) {
-					return true
-				}
-			}
-		}
-	}
-
-	return false
 }

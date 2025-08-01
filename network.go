@@ -61,8 +61,6 @@ func getGatewayMAC() net.HardwareAddr {
 		return dpdkGatewayMAC
 	}
 
-	// 如果全局变量未设置，返回默认值
-	log.Printf("[Network] 网关MAC未初始化，使用默认值")
 	return net.HardwareAddr{0xfe, 0xee, 0x89, 0x96, 0xac, 0xa3}
 }
 
@@ -133,9 +131,6 @@ func initializeGlobalNetwork() {
 		}
 	}
 
-	// DPDK已完成初始化，立即获取网络配置
-	log.Printf("[Network] DPDK初始化完成，开始获取网络配置...")
-
 	// 确保本地IP已设置
 	if dpdkLocalIP == nil {
 		dpdkLocalIP = getLocalIP()
@@ -148,7 +143,6 @@ func initializeGlobalNetwork() {
 	if dpdkLocalIP == nil {
 		panic("[Network] 本地IP不是有效的IPv4地址")
 	}
-	log.Printf("[Network] 使用本地IP: %s", dpdkLocalIP.String())
 
 	// 获取网关IP，通过环境变量或计算默认网关
 	var gatewayIP net.IP
@@ -158,7 +152,6 @@ func initializeGlobalNetwork() {
 			panic(fmt.Sprintf("[Network] 无效的网关IP环境变量: %s", gatewayIPStr))
 		}
 		gatewayIP = gatewayIP.To4() // 确保是IPv4
-		log.Printf("[Network] 使用环境变量设置的网关IP: %s", gatewayIP.String())
 	} else {
 		// 计算默认网关（假设是同网段的.1地址）
 		localIPv4 := dpdkLocalIP.To4()
@@ -166,32 +159,25 @@ func initializeGlobalNetwork() {
 			panic(fmt.Sprintf("[Network] 本地IP不是有效的IPv4地址: %s", dpdkLocalIP.String()))
 		}
 		gatewayIP = net.IPv4(localIPv4[0], localIPv4[1], localIPv4[2], 1)
-		log.Printf("[Network] 计算默认网关IP: %s", gatewayIP.String())
 	}
 
 	// 通过ARP获取网关MAC
-	log.Printf("[Network] 通过ARP获取网关MAC: %s", gatewayIP.String())
 	globalARPHandler = NewARPHandler(dpdkLocalIP, net.HardwareAddr(localMAC[:]))
 
 	gatewayMAC, err := globalARPHandler.RequestMAC(gatewayIP)
 	if err != nil {
-		ClosePcapCapture()
 		panic(fmt.Sprintf("[Network] ARP获取网关MAC失败: %v", err))
 	}
 
 	// 保存网关MAC
 	dpdkGatewayMAC = gatewayMAC
-	log.Printf("[Network] 成功获取网关MAC: %s", gatewayMAC.String())
-
-	log.Printf("[Network] 网络配置获取完成 - 本地IP: %s, 网关IP: %s, 网关MAC: %s",
-		dpdkLocalIP.String(), gatewayIP.String(), dpdkGatewayMAC.String())
 
 	// 使用获取到的真实IP初始化gVisor
 	if err := IntegrateGVisorWithDPDK(dpdkLocalIP, localMAC); err != nil {
 		log.Printf("[ERROR] Failed to integrate gVisor with DPDK: %v", err)
 		panic(err)
 	}
-	
+
 	// 执行 VXLAN 网络协议栈初始化流程
 	if err := initializeVXLANNetworkStack(); err != nil {
 		log.Printf("[ERROR] Failed to initialize VXLAN network stack: %v", err)
@@ -300,7 +286,6 @@ func setupDefaultFilters(forwarder *PacketForwarder) error {
 	defaultPorts := []uint16{4789, 22, 80, 443, 32333, 9999} // VXLAN, SSH, HTTP, HTTPS
 	portFilter := NewPortFilter("端口过滤器", defaultPorts)
 	forwarder.AddFilter(portFilter)
-	log.Printf("[INFO] Added default port filter - Ports: %v", defaultPorts)
 
 	return nil
 }
@@ -531,54 +516,7 @@ func extractVXLANPayload(data []byte) []byte {
 	return data[innerFrameStart:]
 }
 
-// buildARPReply 构造ARP回复包
-func buildARPReply(requestData []byte, localIP net.IP, localMAC []byte) []byte {
-	if len(requestData) < 42 || len(localMAC) < 6 {
-		return nil
-	}
 
-	// 创建回复包（长度与请求包相同）
-	reply := make([]byte, 42)
-
-	arpOffset := 14
-
-	// 构造以太网头部
-	// 目标MAC = 请求包的源MAC
-	copy(reply[0:6], requestData[6:12])
-	// 源MAC = 我们的MAC
-	copy(reply[6:12], localMAC)
-	// EtherType = ARP (0x0806)
-	reply[12] = 0x08
-	reply[13] = 0x06
-
-	// 构造ARP头部
-	// Hardware Type = 1 (以太网)
-	reply[arpOffset] = 0x00
-	reply[arpOffset+1] = 0x01
-	// Protocol Type = 0x0800 (IPv4)
-	reply[arpOffset+2] = 0x08
-	reply[arpOffset+3] = 0x00
-	// Hardware Address Length = 6
-	reply[arpOffset+4] = 0x06
-	// Protocol Address Length = 4
-	reply[arpOffset+5] = 0x04
-	// Operation = 2 (ARP回复)
-	reply[arpOffset+6] = 0x00
-	reply[arpOffset+7] = 0x02
-
-	// Sender Hardware Address = 我们的MAC
-	copy(reply[arpOffset+8:arpOffset+14], localMAC)
-	// Sender Protocol Address = 我们的IP
-	localIPv4 := localIP.To4()
-	copy(reply[arpOffset+14:arpOffset+18], localIPv4)
-
-	// Target Hardware Address = 请求方的MAC (从请求包的源MAC获取)
-	copy(reply[arpOffset+18:arpOffset+24], requestData[6:12])
-	// Target Protocol Address = 请求方的IP (从请求包的源IP获取)
-	copy(reply[arpOffset+24:arpOffset+28], requestData[arpOffset+14:arpOffset+18])
-
-	return reply
-}
 
 // GetGlobalPacketForwarder 获取全局数据包转发器
 func GetGlobalPacketForwarder() *PacketForwarder {

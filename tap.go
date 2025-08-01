@@ -137,8 +137,6 @@ func (t *TapDevice) configure() error {
 
 	if err := runCommand("ip", "link", "set", "dev", t.name, "address", tapMAC); err != nil {
 		log.Printf("[TAP] 设置TAP设备MAC地址失败: %v", err)
-	} else {
-		log.Printf("[TAP] 设置TAP设备MAC地址成功: %s -> %s", t.name, tapMAC)
 	}
 
 	// 添加到网桥
@@ -166,8 +164,6 @@ func (t *TapDevice) Start() error {
 	t.running = true
 	t.mutex.Unlock()
 
-	log.Printf("[TAP] 启动TAP设备监听: %s", t.name)
-
 	// 启动数据包接收goroutine
 	go t.receiveLoop()
 
@@ -185,7 +181,6 @@ func (t *TapDevice) Stop() {
 	t.mutex.Unlock()
 
 	close(t.closeChan)
-	log.Printf("[TAP] 停止TAP设备: %s", t.name)
 }
 
 // receiveLoop 接收数据包循环
@@ -200,7 +195,6 @@ func (t *TapDevice) receiveLoop() {
 			// 从TAP接口读取数据包
 			n, err := t.iface.Read(buffer)
 			if err != nil {
-				log.Printf("[TAP] 从TAP设备读取失败: %v", err)
 				continue
 			}
 
@@ -288,7 +282,6 @@ func (tm *TapManager) Start() error {
 		return fmt.Errorf("启动VXLAN TAP失败: %v", err)
 	}
 
-	log.Printf("[TAP] TAP管理器启动成功")
 	return nil
 }
 
@@ -554,7 +547,6 @@ func (tm *TapManager) handleVXLANPacket(packet []byte) error {
 
 	// 检查包长度
 	if len(packet) < 34 { // 以太网头14 + IP头20
-		log.Printf("[TAP] 包太短，无法进行VXLAN封装")
 		return SendRawBytes(packet)
 	}
 

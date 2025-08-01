@@ -287,7 +287,6 @@ func NewICMPConnWithVXLAN(localIP net.IP, vxlanConfig *VXLANConfig) (*ICMPConn, 
 	if globalGVisorStack != nil {
 		globalGVisorStack.RegisterVXLANConnection(localIP, 0) // ICMP 没有端口，使用 0
 	}
-	log.Printf("[INFO] ICMP connection enabled VXLAN encapsulation with VNI %d", vxlanConfig.VNI)
 
 	// 注册ICMP连接
 	icmpConnMutex.Lock()
@@ -528,14 +527,11 @@ func calculateChecksum(data []byte) uint16 {
 func HandleICMPPacket(data []byte, ipHeaderStart, headerLength int, srcIP, dstIP net.IP) {
 	icmpStart := ipHeaderStart + headerLength
 	if len(data) < icmpStart+8 {
-		log.Printf("[DEBUG] ICMP packet too short")
 		return
 	}
 
 	icmpType := data[icmpStart]
 	icmpCode := data[icmpStart+1]
-	log.Printf("[DEBUG] ICMP: %s -> %s (type=%d, code=%d)",
-		srcIP.String(), dstIP.String(), icmpType, icmpCode)
 
 	// 将所有ICMP数据包分发给监听连接
 	distributeICMPPacket(data, icmpStart, srcIP, dstIP)
@@ -686,7 +682,5 @@ func handlePingRequest(data []byte, ipHeaderStart, headerLength, icmpStart int, 
 
 	if err := SendPacket(pkt); err != nil {
 		log.Printf("[ERROR] Failed to send ping reply: %v", err)
-	} else {
-		log.Printf("[DEBUG] Ping reply sent to %s", srcIP.String())
 	}
 }

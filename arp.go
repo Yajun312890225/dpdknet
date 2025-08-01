@@ -271,9 +271,6 @@ func (ah *ARPHandler) HandleARPPacket(data []byte) error {
 	// 检查是否有等待这个IP的请求
 	ah.notifyPendingRequest(senderIP, arpPacket.SenderHardwareAddr)
 
-	log.Printf("[ARP] 处理ARP包: 操作=%d, 发送方IP=%s, 发送方MAC=%s",
-		arpPacket.Operation, senderIP.String(), arpPacket.SenderHardwareAddr.String())
-
 	switch arpPacket.Operation {
 	case arp.OperationRequest:
 		// 如果是请求我们的IP，发送回复
@@ -284,7 +281,6 @@ func (ah *ARPHandler) HandleARPPacket(data []byte) error {
 		}
 	case arp.OperationReply:
 		// ARP回复，已经更新了ARP表并通知了等待的请求
-		log.Printf("[ARP] 收到ARP回复: %s -> %s", senderIP.String(), arpPacket.SenderHardwareAddr.String())
 	}
 
 	return nil
@@ -294,7 +290,6 @@ func (ah *ARPHandler) HandleARPPacket(data []byte) error {
 func (ah *ARPHandler) HandleARPPacketWithConfig(data []byte, localIP string, localMAC string, tapDevice interface{}) error {
 	// ARP包最小长度：以太网头(14) + ARP头(28) = 42字节
 	if len(data) < 42 {
-		log.Printf("[TAP-ARP] ARP包太短: %d字节", len(data))
 		return fmt.Errorf("ARP packet too short: %d bytes", len(data))
 	}
 
@@ -319,22 +314,15 @@ func (ah *ARPHandler) HandleARPPacketWithConfig(data []byte, localIP string, loc
 	// 检查是否有等待这个IP的请求
 	ah.notifyPendingRequest(senderIP, arpPacket.SenderHardwareAddr)
 
-	log.Printf("[TAP-ARP] 处理ARP包: 操作=%d, 发送方IP=%s, 发送方MAC=%s, 本地IP=%s",
-		arpPacket.Operation, senderIP.String(), arpPacket.SenderHardwareAddr.String(), localIP)
-
 	switch arpPacket.Operation {
 	case arp.OperationRequest:
 		// 检查是否是请求指定的本地IP
 		targetIP := net.ParseIP(arpPacket.TargetIP.String())
 		if targetIP.String() == localIP {
-			log.Printf("[TAP-ARP] 收到对TAP本地IP的ARP请求: %s，回复MAC: %s", localIP, localMAC)
 			return ah.sendTAPARPReply(data, localIP, localMAC, tapDevice)
-		} else {
-			log.Printf("[TAP-ARP] ARP请求的目标IP (%s) 不是本地IP (%s)，转发", targetIP.String(), localIP)
 		}
 	case arp.OperationReply:
 		// ARP回复，已经更新了ARP表并通知了等待的请求
-		log.Printf("[TAP-ARP] 收到ARP回复: %s -> %s", senderIP.String(), arpPacket.SenderHardwareAddr.String())
 	}
 
 	return nil
@@ -352,7 +340,6 @@ func (ah *ARPHandler) sendTAPARPReply(originalPacket []byte, localIP string, loc
 
 	// 验证ARP包格式（以太网上的IPv4 ARP）
 	if hardwareType != 1 || protocolType != 0x0800 {
-		log.Printf("[TAP-ARP] 不支持的ARP包类型: hw=%d, proto=0x%04x", hardwareType, protocolType)
 		return fmt.Errorf("unsupported ARP packet type")
 	}
 
@@ -411,8 +398,6 @@ func (ah *ARPHandler) sendTAPARPReply(originalPacket []byte, localIP string, loc
 	// Target Protocol Address = 请求方的IP
 	copy(reply[arpOffset+24:arpOffset+28], originalPacket[arpOffset+14:arpOffset+18])
 
-	log.Printf("[TAP-ARP] 发送ARP回复: %s -> %s", targetIPStr, localMAC)
-
 	// 类型断言，获取TAP设备接口
 	if tapManager, ok := tapDevice.(*TapManager); ok {
 		// 根据本地IP判断应该发送到哪个TAP设备
@@ -455,20 +440,15 @@ func (ah *ARPHandler) HandleVXLANARPPacket(data []byte) error {
 	// 检查是否有等待这个IP的请求
 	ah.notifyPendingRequest(senderIP, arpPacket.SenderHardwareAddr)
 
-	log.Printf("[VXLAN-ARP] 处理ARP包: 操作=%d, 发送方IP=%s, 发送方MAC=%s",
-		arpPacket.Operation, senderIP.String(), arpPacket.SenderHardwareAddr.String())
-
 	switch arpPacket.Operation {
 	case arp.OperationRequest:
 		// 如果是请求我们的IP，发送VXLAN回复
 		targetIP := net.ParseIP(arpPacket.TargetIP.String())
 		if targetIP.Equal(ah.localIP) {
-			log.Printf("[VXLAN-ARP] 收到对本地IP的ARP请求: %s", targetIP.String())
 			return ah.SendVXLANARPReply(senderIP, arpPacket.SenderHardwareAddr)
 		}
 	case arp.OperationReply:
 		// ARP回复，已经更新了ARP表并通知了等待的请求
-		log.Printf("[VXLAN-ARP] 收到ARP回复: %s -> %s", senderIP.String(), arpPacket.SenderHardwareAddr.String())
 	}
 
 	return nil
@@ -496,7 +476,7 @@ func (ah *ARPHandler) notifyPendingRequest(ip net.IP, mac net.HardwareAddr) {
 
 // RequestMAC 请求指定IP的MAC地址
 func (ah *ARPHandler) RequestMAC(targetIP net.IP) (net.HardwareAddr, error) {
-	return ah.RequestMACWithTimeout(targetIP, 3*time.Second)
+	return ah.RequestMACWithTimeout(targetIP, time.Second)
 }
 
 // RequestMACWithTimeout 请求指定IP的MAC地址（带超时）
@@ -547,35 +527,4 @@ func (ah *ARPHandler) RequestMACWithTimeout(targetIP net.IP, timeout time.Durati
 		ah.waitMutex.Unlock()
 		return nil, fmt.Errorf("ARP请求超时，未收到 %s 的回复", targetIP.String())
 	}
-}
-
-// GetARPTable 获取ARP表
-func (ah *ARPHandler) GetARPTable() map[string]ARPEntry {
-	return ah.arpTable.entries
-}
-
-// GetLocalIP 获取本地IP地址
-func (ah *ARPHandler) GetLocalIP() net.IP {
-	return ah.localIP
-}
-
-// GetLocalMAC 获取本地MAC地址
-func (ah *ARPHandler) GetLocalMAC() net.HardwareAddr {
-	return ah.localMAC
-}
-
-// CreateARPClient 创建 ARP 客户端（用于直接网络接口操作）
-func (ah *ARPHandler) CreateARPClient(ifaceName string) error {
-	// 注意：这个方法需要根据实际的 arp 库 API 调整
-	// 当前版本的 mdlayher/arp 可能不支持这种方式
-	log.Printf("[ARP] ARP客户端功能暂未实现，使用模拟模式")
-	return nil
-}
-
-// CloseARPClient 关闭 ARP 客户端
-func (ah *ARPHandler) CloseARPClient() error {
-	if ah.client != nil {
-		return ah.client.Close()
-	}
-	return nil
 }

@@ -3,7 +3,6 @@ package dpdknet
 import (
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 )
 
@@ -57,7 +56,6 @@ func NewPacketForwarder() (*PacketForwarder, error) {
 		filters:    make([]PacketFilter, 0),
 	}
 
-	log.Printf("[Forwarder] 创建数据包转发器成功")
 	return forwarder, nil
 }
 
