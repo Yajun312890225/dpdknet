@@ -25,6 +25,9 @@ const (
 	// 固定的目标IP地址
 	TAP_NORMAL_TARGET = "172.16.1.1"
 	TAP_VXLAN_TARGET  = "172.16.2.1"
+
+	// VXLAN内网IP地址（用于VXLAN隧道内的源IP）
+	VXLAN_INNER_IP = "11.1.1.3"
 )
 
 // TapDevice TAP 设备管理器，使用water库
@@ -432,8 +435,52 @@ func (tm *TapManager) modifyOutgoingPacketHeaders(packet []byte) []byte {
 
 		// 重新计算TCP校验和（如果是TCP包）
 		if packet[ipOffset+9] == 6 && len(modifiedPacket) >= ipOffset+40 { // TCP协议
+		}
+	}
+
+	return modifiedPacket
+}
+
+// modifyVXLANOutgoingPacketHeaders 修改VXLAN发出包的源IP和源MAC为内网地址
+func (tm *TapManager) modifyVXLANOutgoingPacketHeaders(packet []byte) []byte {
+	// 检查包长度是否足够 (以太网头14字节)
+	if len(packet) < 14 {
+		return packet
+	}
+
+	// 复制原始包
+	modifiedPacket := make([]byte, len(packet))
+	copy(modifiedPacket, packet)
+
+	// 设置目标MAC为外网网关或下一跳的MAC地址（用于发送到公网）
+	outMAC := getGatewayMAC()
+	if outMAC != nil {
+		copy(modifiedPacket[0:6], outMAC)
+	}
+
+	// 设置源MAC为DPDK网卡的MAC地址（表示从DPDK网卡发出）
+	copy(modifiedPacket[6:12], localMAC[:])
+
+	// 检查是否是IP包并修改IP地址
+	etherType := uint16(packet[12])<<8 | uint16(packet[13])
+	if etherType == 0x0800 && len(packet) >= 34 {
+		ipOffset := 14
+
+		// 将源IP改为VXLAN内网IP（11.1.1.2）
+		vxlanInnerIP := parseIPAddress(VXLAN_INNER_IP)
+		if vxlanInnerIP != nil {
+			copy(modifiedPacket[ipOffset+12:ipOffset+16], vxlanInnerIP)
+		}
+
+		// 重新计算IP头校验和
+		if err := updateIPChecksumAtOffset(modifiedPacket, ipOffset); err != nil {
+			log.Printf("[TAP] 更新VXLAN发出包IP校验和失败: %v", err)
+		}
+
+		// 重新计算TCP校验和（如果是TCP包）
+		if packet[ipOffset+9] == 6 && len(modifiedPacket) >= ipOffset+40 { // TCP协议
 			if err := updateTCPChecksumAtOffset(modifiedPacket, ipOffset); err != nil {
-				log.Printf("[TAP] 更新发出包TCP校验和失败: %v", err)
+				log.Printf("[TAP] 更新VXLAN发出包TCP校验和失败: %v", err)
 			}
 		}
 	}
@@ -458,8 +505,6 @@ func (tm *TapManager) handleNormalPacket(packet []byte) error {
 		if globalARPHandler != nil {
 			return globalARPHandler.HandleARPPacketWithConfig(packet, TAP_NORMAL_IP, TAP_NORMAL_MAC, tm)
 		}
-		// 如果全局ARP处理器不可用，降级到本地处理
-		return tm.handleARPPacket(packet, TAP_NORMAL_IP, TAP_NORMAL_MAC)
 	}
 
 	// 处理IP包 (EtherType = 0x0800)
@@ -481,7 +526,7 @@ func (tm *TapManager) handleNormalPacket(packet []byte) error {
 	return SendRawBytes(packet)
 }
 
-// handleVXLANPacket 处理来自VXLAN TAP的数据包
+// handleVXLANPacket 处理来自VXLAN TAP的数据包（一定是要出去的包）
 func (tm *TapManager) handleVXLANPacket(packet []byte) error {
 	// 检查包长度
 	if len(packet) < 14 {
@@ -498,8 +543,8 @@ func (tm *TapManager) handleVXLANPacket(packet []byte) error {
 		if globalARPHandler != nil {
 			return globalARPHandler.HandleARPPacketWithConfig(packet, TAP_VXLAN_IP, TAP_VXLAN_MAC, tm)
 		}
-		// 如果全局ARP处理器不可用，降级到本地处理
-		return tm.handleARPPacket(packet, TAP_VXLAN_IP, TAP_VXLAN_MAC)
+		// 如果全局ARP处理器不可用，直接发送
+		return SendRawBytes(packet)
 	}
 
 	// 处理IP包 (EtherType = 0x0800)
@@ -507,37 +552,40 @@ func (tm *TapManager) handleVXLANPacket(packet []byte) error {
 		return SendRawBytes(packet)
 	}
 
-	// 获取全局VXLAN处理器
-	vxlanHandler := GetGlobalVXLANHandler()
-	if vxlanHandler == nil {
-		log.Printf("[TAP] VXLAN处理器未初始化，使用默认处理")
-		return SendRawBytes(packet)
-	}
-
-	// 检查是否是IP包
+	// 检查包长度
 	if len(packet) < 34 { // 以太网头14 + IP头20
 		log.Printf("[TAP] 包太短，无法进行VXLAN封装")
 		return SendRawBytes(packet)
 	}
 
-	// 提取IP信息
-	protocol := packet[23]
-	srcIP := fmt.Sprintf("%d.%d.%d.%d", packet[26], packet[27], packet[28], packet[29])
-	dstIP := fmt.Sprintf("%d.%d.%d.%d", packet[30], packet[31], packet[32], packet[33])
+	// 修改出去包的headers（将源IP和源MAC替换为VXLAN内网地址）
+	modifiedPacket := tm.modifyVXLANOutgoingPacketHeaders(packet)
+
+	// 获取全局VXLAN处理器
+	vxlanHandler := GetGlobalVXLANHandler()
+	if vxlanHandler == nil {
+		log.Printf("[TAP] VXLAN处理器未初始化，发送修改后的原始包")
+		return SendRawBytes(modifiedPacket)
+	}
+
+	// 提取修改后包的IP信息
+	protocol := modifiedPacket[23]
+	srcIP := fmt.Sprintf("%d.%d.%d.%d", modifiedPacket[26], modifiedPacket[27], modifiedPacket[28], modifiedPacket[29])
+	dstIP := fmt.Sprintf("%d.%d.%d.%d", modifiedPacket[30], modifiedPacket[31], modifiedPacket[32], modifiedPacket[33])
 
 	var srcPort, dstPort uint16
 
 	// 提取端口信息（如果是TCP/UDP）
-	if (protocol == 6 || protocol == 17) && len(packet) >= 38 {
-		srcPort = uint16(packet[34])<<8 | uint16(packet[35])
-		dstPort = uint16(packet[36])<<8 | uint16(packet[37])
+	if (protocol == 6 || protocol == 17) && len(modifiedPacket) >= 38 {
+		srcPort = uint16(modifiedPacket[34])<<8 | uint16(modifiedPacket[35])
+		dstPort = uint16(modifiedPacket[36])<<8 | uint16(modifiedPacket[37])
 	}
 
 	// 解析IP地址
 	srcIPAddr := parseIPAddress(srcIP)
 	dstIPAddr := parseIPAddress(dstIP)
 	if srcIPAddr == nil || dstIPAddr == nil {
-		return SendRawBytes(packet)
+		return SendRawBytes(modifiedPacket)
 	}
 
 	// 将字节数组转换为net.IP
@@ -546,89 +594,17 @@ func (tm *TapManager) handleVXLANPacket(packet []byte) error {
 
 	// 封装VXLAN包并发送
 	vxlanPacket, err := vxlanHandler.EncapsulateVXLAN(
-		packet[14:], // 去掉以太网头，只传递IP包
+		modifiedPacket[14:], // 去掉以太网头，只传递修改后的IP包
 		srcIPNet, dstIPNet,
 		srcPort, dstPort,
 		layers.IPProtocol(protocol))
 	if err != nil {
 		log.Printf("[TAP] VXLAN封装失败: %v", err)
-		return SendRawBytes(packet) // 如果封装失败，发送原始包
+		return SendRawBytes(modifiedPacket) // 如果封装失败，发送修改后的原始包
 	}
 
 	// 将封装后的VXLAN包发送到DPDK
 	return SendRawBytes(vxlanPacket)
-}
-
-// handleARPPacket 处理ARP包并生成回复
-func (tm *TapManager) handleARPPacket(packet []byte, localIP string, localMAC string) error {
-	// ARP包最小长度：以太网头(14) + ARP头(28) = 42字节
-	if len(packet) < 42 {
-		log.Printf("[TAP] ARP包太短: %d字节", len(packet))
-		return SendRawBytes(packet)
-	}
-
-	// 解析ARP头部（从以太网头之后开始，偏移14字节）
-	arpOffset := 14
-
-	// 检查硬件类型和协议类型
-	hardwareType := uint16(packet[arpOffset])<<8 | uint16(packet[arpOffset+1])
-	protocolType := uint16(packet[arpOffset+2])<<8 | uint16(packet[arpOffset+3])
-	operation := uint16(packet[arpOffset+6])<<8 | uint16(packet[arpOffset+7])
-
-	// 验证ARP包格式（以太网上的IPv4 ARP）
-	if hardwareType != 1 || protocolType != 0x0800 {
-		log.Printf("[TAP] 不支持的ARP包类型: hw=%d, proto=0x%04x", hardwareType, protocolType)
-		return SendRawBytes(packet)
-	}
-
-	// 只处理ARP请求
-	if operation != 1 {
-		return SendRawBytes(packet)
-	}
-
-	// 提取目标IP
-	targetIP := packet[arpOffset+24 : arpOffset+28]
-	targetIPStr := fmt.Sprintf("%d.%d.%d.%d", targetIP[0], targetIP[1], targetIP[2], targetIP[3])
-
-	// 检查是否是请求我们的IP
-	if targetIPStr != localIP {
-		return SendRawBytes(packet)
-	}
-
-	log.Printf("[TAP] 收到ARP请求，目标IP: %s，回复MAC: %s", targetIPStr, localMAC)
-
-	// 构造ARP回复
-	reply := make([]byte, 42)
-
-	// 以太网头部：交换源和目标MAC
-	copy(reply[0:6], packet[6:12])               // 目标MAC = 原始源MAC
-	copy(reply[6:12], parseMACAddress(localMAC)) // 源MAC = 我们的MAC
-	reply[12] = 0x08                             // EtherType = ARP
-	reply[13] = 0x06
-
-	// ARP头部
-	reply[arpOffset] = 0x00 // Hardware Type = 1 (以太网)
-	reply[arpOffset+1] = 0x01
-	reply[arpOffset+2] = 0x08 // Protocol Type = 0x0800 (IPv4)
-	reply[arpOffset+3] = 0x00
-	reply[arpOffset+4] = 0x06 // Hardware Address Length = 6
-	reply[arpOffset+5] = 0x04 // Protocol Address Length = 4
-	reply[arpOffset+6] = 0x00 // Operation = 2 (ARP回复)
-	reply[arpOffset+7] = 0x02
-
-	// Sender Hardware Address = 我们的MAC
-	copy(reply[arpOffset+8:arpOffset+14], parseMACAddress(localMAC))
-	// Sender Protocol Address = 我们的IP
-	localIPBytes := parseIPAddress(localIP)
-	copy(reply[arpOffset+14:arpOffset+18], localIPBytes)
-
-	// Target Hardware Address = 请求方的MAC
-	copy(reply[arpOffset+18:arpOffset+24], packet[arpOffset+8:arpOffset+14])
-	// Target Protocol Address = 请求方的IP
-	copy(reply[arpOffset+24:arpOffset+28], packet[arpOffset+14:arpOffset+18])
-
-	log.Printf("[TAP] 发送ARP回复: %s -> %s", targetIPStr, localMAC)
-	return SendRawBytes(reply)
 }
 
 // === 辅助函数 ===
