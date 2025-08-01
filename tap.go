@@ -403,7 +403,6 @@ func (tm *TapManager) modifyReturnPacketHeaders(packet []byte) []byte {
 func (tm *TapManager) modifyOutgoingPacketHeaders(packet []byte) []byte {
 	// 检查包长度是否足够 (以太网头14字节)
 	if len(packet) < 14 {
-		log.Printf("[TAP] 发出包太短，无法修改头部: %d字节", len(packet))
 		return packet
 	}
 
@@ -425,10 +424,6 @@ func (tm *TapManager) modifyOutgoingPacketHeaders(packet []byte) []byte {
 	if etherType == 0x0800 && len(packet) >= 34 {
 		ipOffset := 14
 
-		// 获取原始IP地址用于日志
-		originalSrcIP := fmt.Sprintf("%d.%d.%d.%d", packet[ipOffset+12], packet[ipOffset+13], packet[ipOffset+14], packet[ipOffset+15])
-		originalDstIP := fmt.Sprintf("%d.%d.%d.%d", packet[ipOffset+16], packet[ipOffset+17], packet[ipOffset+18], packet[ipOffset+19])
-
 		// 将源IP改为DPDK网卡的IP（从DPDK网卡发出）
 		dpdkIP := getLocalIPFromEnv().To4()
 		if dpdkIP != nil {
@@ -446,10 +441,6 @@ func (tm *TapManager) modifyOutgoingPacketHeaders(packet []byte) []byte {
 				log.Printf("[TAP] 更新发出包TCP校验和失败: %v", err)
 			}
 		}
-
-		log.Printf("[TAP] 修改发出包头部: 目标MAC->%s, 源MAC->%02x:%02x:%02x:%02x:%02x:%02x, 源IP %s->%s, 目标IP %s(保持不变)",
-			OUTMAC, localMAC[0], localMAC[1], localMAC[2], localMAC[3], localMAC[4], localMAC[5],
-			originalSrcIP, getLocalIPFromEnv().String(), originalDstIP)
 	}
 
 	return modifiedPacket
@@ -457,7 +448,6 @@ func (tm *TapManager) modifyOutgoingPacketHeaders(packet []byte) []byte {
 
 // handleNormalPacket 处理来自正常TAP的数据包
 func (tm *TapManager) handleNormalPacket(packet []byte) error {
-	log.Printf("[TAP] 收到正常TAP数据包，长度: %d字节，目标MAC: %s", len(packet), getDestinationMAC(packet))
 
 	// 分析包的方向：检查目标IP来判断是回包还是发出的包
 	if len(packet) >= 34 {
@@ -467,24 +457,18 @@ func (tm *TapManager) handleNormalPacket(packet []byte) error {
 			dstIP := fmt.Sprintf("%d.%d.%d.%d", packet[30], packet[31], packet[32], packet[33])
 			localIP := getLocalIPFromEnv().String()
 
-			log.Printf("[TAP] 包分析: 目标IP=%s, 本地IP=%s", dstIP, localIP)
-
 			// 如果目标IP是本地IP，这是一个回包（从服务器返回给客户端）
 			if dstIP == localIP {
-				log.Printf("[TAP] 这是一个回包，进行回包处理")
 				modifiedPacket := tm.modifyReturnPacketHeaders(packet)
 				return SendRawBytes(modifiedPacket)
 			} else {
 				// 如果目标IP不是本地IP，这是一个要发出去的包（从客户端发给服务器）
-				log.Printf("[TAP] 这是一个发出的包，进行发出包处理")
 				modifiedPacket := tm.modifyOutgoingPacketHeaders(packet)
 				return SendRawBytes(modifiedPacket)
 			}
 		}
 	}
 
-	// 如果不是IP包，直接发送
-	log.Printf("[TAP] 非IP包，直接发送")
 	return SendRawBytes(packet)
 }
 
