@@ -43,7 +43,6 @@ type TapDevice struct {
 type TapManager struct {
 	normalTap *TapDevice // 正常数据TAP
 	vxlanTap  *TapDevice // VXLAN数据TAP
-	bridge    string     // 网桥名称
 	mutex     sync.RWMutex
 }
 
@@ -77,20 +76,18 @@ func NewTapDevice(name, bridge string) (*TapDevice, error) {
 }
 
 // NewTapManager 创建TAP管理器，同时创建两张TAP网卡
-func NewTapManager(bridge string) (*TapManager, error) {
-	manager := &TapManager{
-		bridge: bridge,
-	}
+func NewTapManager() (*TapManager, error) {
+	manager := &TapManager{}
 
-	// 创建正常数据TAP
-	normalTap, err := NewTapDevice("tap-normal", bridge)
+	// 创建正常数据TAP，绑定到br1
+	normalTap, err := NewTapDevice("tap-normal", "br1")
 	if err != nil {
 		return nil, fmt.Errorf("创建正常数据TAP失败: %v", err)
 	}
 	manager.normalTap = normalTap
 
-	// 创建VXLAN数据TAP
-	vxlanTap, err := NewTapDevice("tap-vxlan", bridge)
+	// 创建VXLAN数据TAP，绑定到br2
+	vxlanTap, err := NewTapDevice("tap-vxlan", "br2")
 	if err != nil {
 		normalTap.Close()
 		return nil, fmt.Errorf("创建VXLAN数据TAP失败: %v", err)
@@ -343,11 +340,6 @@ func (tm *TapManager) GetVXLANTapName() string {
 		return ""
 	}
 	return tm.vxlanTap.GetName()
-}
-
-// GetBridgeName 获取网桥名称
-func (tm *TapManager) GetBridgeName() string {
-	return tm.bridge
 }
 
 // GetTapStats 获取TAP设备统计信息

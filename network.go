@@ -194,16 +194,8 @@ func initializePacketForwarder() error {
 		return nil
 	}
 
-	// 获取网桥名称，默认为 br1
-	bridgeName := os.Getenv("FORWARDER_BRIDGE_NAME")
-	if bridgeName == "" {
-		bridgeName = "br1"
-	}
-
-	log.Printf("[INFO] Initializing packet forwarder with bridge: %s", bridgeName)
-
 	// 创建数据包转发器
-	forwarder, err := NewPacketForwarder(bridgeName)
+	forwarder, err := NewPacketForwarder()
 	if err != nil {
 		return fmt.Errorf("failed to create packet forwarder: %v", err)
 	}
@@ -223,11 +215,6 @@ func initializePacketForwarder() error {
 
 	// 保存全局转发器引用
 	globalPacketForwarder = forwarder
-
-	log.Printf("[INFO] Packet forwarder started successfully")
-	log.Printf("  - Normal TAP device: %s", forwarder.GetNormalTapName())
-	// log.Printf("  - VXLAN TAP device: %s", forwarder.GetVXLANTapName())
-	log.Printf("  - Bridge: %s", forwarder.GetBridgeName())
 
 	return nil
 }

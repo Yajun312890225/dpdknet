@@ -53,9 +53,9 @@ type PortFilter struct {
 }
 
 // NewPacketForwarder 创建数据包转发器
-func NewPacketForwarder(bridge string) (*PacketForwarder, error) {
+func NewPacketForwarder() (*PacketForwarder, error) {
 	// 创建TAP管理器
-	tapManager, err := NewTapManager(bridge)
+	tapManager, err := NewTapManager()
 	if err != nil {
 		return nil, fmt.Errorf("创建TAP管理器失败: %v", err)
 	}
@@ -251,11 +251,6 @@ func (pf *PacketForwarder) GetNormalTapName() string {
 // GetVXLANTapName 获取VXLAN TAP设备名称
 func (pf *PacketForwarder) GetVXLANTapName() string {
 	return pf.tapManager.GetVXLANTapName()
-}
-
-// GetBridgeName 获取网桥名称
-func (pf *PacketForwarder) GetBridgeName() string {
-	return pf.tapManager.GetBridgeName()
 }
 
 // NewIPFilter 创建IP过滤器
