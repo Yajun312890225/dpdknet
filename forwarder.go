@@ -160,6 +160,15 @@ func (pf *PacketForwarder) GetVXLANTapName() string {
 	return pf.tapManager.GetVXLANTapName()
 }
 
+// SendToVXLANTap 发送数据包到VXLAN TAP设备
+func (pf *PacketForwarder) SendToVXLANTap(packet []byte) error {
+	pf.mutex.Lock()
+	pf.forwardedPackets++
+	pf.mutex.Unlock()
+
+	return pf.tapManager.SendToVXLANTap(packet)
+}
+
 // NewVXLANFilter 创建VXLAN过滤器
 func NewVXLANFilter(name string, vni uint32) *VXLANFilter {
 	return &VXLANFilter{

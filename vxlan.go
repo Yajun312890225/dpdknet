@@ -625,7 +625,21 @@ func handleIncomingVXLANPacket(data []byte) {
 		return
 	}
 
-	// 处理非ARP包（IP包等）
+	// 检查是否需要转发到tap-vxlan网卡
+	if ipLayer := innerPacket.Layer(layers.LayerTypeIPv4); ipLayer != nil {
+		ip := ipLayer.(*layers.IPv4)
+		if ip.DstIP.String() == VXLAN_INNER_IP {
+			// 目标IP为VXLAN_INNER_IP，需要转换为TAP_VXLAN_TARGET并通过tap-vxlan发送
+			modifiedFrame := modifyIPDestination(innerEthernetFrame, TAP_VXLAN_TARGET)
+			if modifiedFrame != nil {
+				if forwarder := GetGlobalPacketForwarder(); forwarder != nil {
+					forwarder.SendToVXLANTap(modifiedFrame)
+					return
+				}
+			}
+		}
+	}
+
 	if gvisor := GetGVisorNetstack(); gvisor != nil {
 		// 修复目标MAC地址：将内层目标MAC替换为本地gVisor的MAC地址
 		localMAC := GetLocalMAC()
@@ -961,6 +975,69 @@ func extractVNIFromPacket(data []byte) (uint32, error) {
 	return vxlan.VNI, nil
 }
 
+// modifyIPDestination 修改以太网帧中IP包的目标地址
+func modifyIPDestination(ethernetFrame []byte, newDestIP string) []byte {
+	if len(ethernetFrame) < 34 { // 以太网头(14) + IP头最小长度(20)
+		return nil
+	}
+
+	// 检查以太网类型是否为IPv4
+	etherType := uint16(ethernetFrame[12])<<8 | uint16(ethernetFrame[13])
+	if etherType != 0x0800 { // IPv4
+		return nil
+	}
+
+	// 解析IP地址
+	newIP := net.ParseIP(newDestIP)
+	if newIP == nil {
+		return nil
+	}
+	newIP4 := newIP.To4()
+	if newIP4 == nil {
+		return nil
+	}
+
+	// 创建修改后的帧副本
+	modifiedFrame := make([]byte, len(ethernetFrame))
+	copy(modifiedFrame, ethernetFrame)
+
+	// 修改IP目标地址 (以太网头14字节 + IP头中目标地址偏移16字节)
+	copy(modifiedFrame[14+16:14+20], newIP4)
+
+	// 重新计算IP头校验和
+	recalculateIPChecksum(modifiedFrame[14:])
+
+	return modifiedFrame
+}
+
+// recalculateIPChecksum 重新计算IP头校验和
+func recalculateIPChecksum(ipHeader []byte) {
+	if len(ipHeader) < 20 {
+		return
+	}
+
+	// 清零校验和字段
+	ipHeader[10] = 0
+	ipHeader[11] = 0
+
+	// 计算校验和
+	var sum uint32
+	for i := 0; i < 20; i += 2 {
+		sum += uint32(ipHeader[i])<<8 + uint32(ipHeader[i+1])
+	}
+
+	// 处理进位
+	for sum>>16 != 0 {
+		sum = (sum & 0xffff) + (sum >> 16)
+	}
+
+	// 取反得到校验和
+	checksum := uint16(^sum)
+	ipHeader[10] = byte(checksum >> 8)
+	ipHeader[11] = byte(checksum)
+}
+
+// constructInnerIPPacket 构造内层IP包
 func constructInnerIPPacket(payload []byte, srcIP, dstIP net.IP, srcPort, dstPort uint16, protocol layers.IPProtocol) []byte {
 	// 创建以太网帧
 	ethLayer := &layers.Ethernet{
