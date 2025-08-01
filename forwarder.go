@@ -103,14 +103,6 @@ func (pf *PacketForwarder) ProcessDPDKPacket(packet []byte) error {
 	// 打印DPDK收到的包的详细信息
 	pf.printPacketInfo(packet, "DPDK收到")
 
-	// 首先检查是否是从TAP设备返回的包
-	if pf.isPacketFromTap(packet) {
-		log.Printf("[Forwarder] 检测到从TAP返回的包，长度: %d字节，直接让网络栈处理", len(packet))
-		// 这是从TAP返回的包，说明已经被TAP处理过了，现在要发出去
-		// 直接返回，让网络栈处理，因为这些包已经被TAP修改过MAC和IP
-		return ErrNotHandled
-	}
-
 	// 应用所有过滤器检查是否需要转发到TAP
 	shouldProcess := false
 
@@ -152,63 +144,7 @@ func (pf *PacketForwarder) forwardToTap(packet []byte) error {
 	return pf.tapManager.SendToNormalTap(packet)
 }
 
-// isPacketFromTap 检查数据包是否来自TAP设备
-func (pf *PacketForwarder) isPacketFromTap(packet []byte) bool {
-	// 检查包长度是否足够
-	if len(packet) < 14 {
-		return false
-	}
-
-	// 获取MAC地址信息
-	dstMAC := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
-		packet[0], packet[1], packet[2], packet[3], packet[4], packet[5])
-	srcMAC := fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x",
-		packet[6], packet[7], packet[8], packet[9], packet[10], packet[11])
-
-	// 方法1: 检查源MAC地址是否是TAP设备的MAC（发出的包）
-	if srcMAC == TAP_NORMAL_MAC || srcMAC == TAP_VXLAN_MAC {
-		log.Printf("[Forwarder] 通过源MAC识别TAP发出的包: %s", srcMAC)
-		return true
-	}
-
-	// 方法2: 检查源MAC是否是OUTMAC（这是回包的特征）
-	if srcMAC == OUTMAC {
-		log.Printf("[Forwarder] 通过源MAC识别回包（源MAC=OUTMAC）: %s", srcMAC)
-		return true
-	}
-
-	// 方法3: 检查目标MAC是否是外网网关MAC（OUTMAC）- 发往公网的包
-	if dstMAC == OUTMAC {
-		log.Printf("[Forwarder] 通过目标MAC识别发往公网的包: %s", dstMAC)
-		return true
-	}
-
-	// 方法4: 检查源IP地址是否是本地IP（TAP修改后的发出包）
-	if len(packet) >= 34 {
-		// 检查是否是IP包
-		etherType := uint16(packet[12])<<8 | uint16(packet[13])
-		if etherType == 0x0800 {
-			// 获取源IP和目标IP
-			srcIP := fmt.Sprintf("%d.%d.%d.%d", packet[26], packet[27], packet[28], packet[29])
-			dstIP := fmt.Sprintf("%d.%d.%d.%d", packet[30], packet[31], packet[32], packet[33])
-			localIP := getLocalIPFromEnv().String()
-
-			// 如果源IP是本地IP，说明这是从TAP发出的包
-			if srcIP == localIP {
-				log.Printf("[Forwarder] 通过源IP识别TAP发出的包: %s (本地IP: %s)", srcIP, localIP)
-				return true
-			}
-
-			// 如果目标IP是本地IP，说明这是回包
-			if dstIP == localIP {
-				log.Printf("[Forwarder] 通过目标IP识别回包: 目标IP=%s (本地IP: %s)", dstIP, localIP)
-				return true
-			}
-		}
-	}
-
-	return false
-} // printPacketInfo 打印数据包的详细信息
+// printPacketInfo 打印数据包的详细信息
 func (pf *PacketForwarder) printPacketInfo(packet []byte, prefix string) {
 	if len(packet) < 14 {
 		log.Printf("[%s] 包太短: %d字节", prefix, len(packet))
@@ -418,7 +354,7 @@ func NewPortFilter(name string, ports []uint16) *PortFilter {
 // ShouldProcess 实现PacketFilter接口
 func (f *PortFilter) ShouldProcess(packet []byte) bool {
 	// 检查UDP/TCP端口
-	if len(packet) < 34 { // 以太网头14 + IP头20
+	if len(packet) < 38 { // 以太网头14 + IP头20 + 端口4
 		return false
 	}
 
@@ -434,13 +370,12 @@ func (f *PortFilter) ShouldProcess(packet []byte) bool {
 		return false
 	}
 
-	// 提取目标端口
-	if len(packet) >= 36 {
-		dstPort := uint16(packet[36])<<8 | uint16(packet[37])
-		return f.ports[dstPort]
-	}
+	// 提取源端口和目标端口
+	srcPort := uint16(packet[34])<<8 | uint16(packet[35])
+	dstPort := uint16(packet[36])<<8 | uint16(packet[37])
 
-	return false
+	// 检查源端口或目标端口是否匹配（支持双向流量）
+	return f.ports[srcPort] || f.ports[dstPort]
 }
 
 // GetName 实现PacketFilter接口
