@@ -233,7 +233,7 @@ func NewICMPListenerWithVXLAN(laddr *net.IPAddr) (net.PacketConn, error) {
 		localIP = laddr.IP
 	} else {
 		// 使用默认IP或从环境变量获取
-		localIP = getLocalIPFromEnv()
+		localIP = getLocalIP()
 	}
 
 	conn := &ICMPConn{

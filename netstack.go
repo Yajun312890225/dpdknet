@@ -126,8 +126,6 @@ func newGVisorNetstack(localIP net.IP, localMAC [6]byte, subnetMask net.IPMask) 
 		},
 	})
 
-	log.Printf("[GVISOR_INIT_DEBUG] ✅ Set default route: 0.0.0.0/0 -> NIC %d", defaultNICID)
-
 	// 启用转发
 	if tcpErr := s.SetForwardingDefaultAndAllNICs(ipv4.ProtocolNumber, true); tcpErr != nil {
 		log.Printf("[WARNING] Failed to enable forwarding: %v", tcpErr)

@@ -64,6 +64,9 @@ func main() {
 	// 等待退出信号
 	<-sigCh
 	log.Printf("[INFO] Received shutdown signal, closing server...")
+
+	// 清理网络资源（包括pcap抓包）
+	dpdknet.CleanupGlobalNetwork()
 }
 
 func handleTCPConnection(conn net.Conn) {
@@ -104,7 +107,7 @@ func handleTCPConnection(conn net.Conn) {
 		}
 
 		data := buffer[:n]
-		log.Printf("[INFO] Received %d bytes from %s: %s", 
+		log.Printf("[INFO] Received %d bytes from %s: %s",
 			n, conn.RemoteAddr().String(), string(data))
 
 		// Echo回发数据
@@ -115,7 +118,7 @@ func handleTCPConnection(conn net.Conn) {
 			return
 		}
 
-		log.Printf("[INFO] Echoed %d bytes to %s", 
+		log.Printf("[INFO] Echoed %d bytes to %s",
 			len(response), conn.RemoteAddr().String())
 
 		// 检查是否收到退出命令

@@ -640,20 +640,18 @@ func handleVXLANARPPacket(arp *layers.ARP, originalFrame []byte) {
 	// 使用全局VXLAN ARP处理器
 	globalARPHandler := GetGlobalVXLANARPHandler()
 	if globalARPHandler == nil {
-		fmt.Println("Global VXLAN ARP handler is not set")
 		return
 	}
 
-	// 提取原始ARP数据（去掉以太网头）
-	if len(originalFrame) < 14 {
+	// 检查原始帧长度
+	if len(originalFrame) < 42 {
+		fmt.Printf("[VXLAN] ARP帧太短: %d字节，需要至少42字节\n", len(originalFrame))
 		return
 	}
 
-	// 以太网帧格式：目标MAC(6) + 源MAC(6) + 类型(2) + 载荷
-	arpData := originalFrame[14:] // 跳过以太网头
-
-	// 使用全局VXLAN ARP处理器专门处理VXLAN ARP包
-	err := globalARPHandler.HandleVXLANARPPacket(arpData)
+	// 直接使用完整的以太网帧（包含以太网头）
+	// HandleVXLANARPPacket期望接收完整的以太网帧
+	err := globalARPHandler.HandleVXLANARPPacket(originalFrame)
 	if err != nil {
 		fmt.Printf("[VXLAN] 处理VXLAN ARP包失败: %v\n", err)
 		return

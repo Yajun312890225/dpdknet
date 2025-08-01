@@ -5,8 +5,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -15,17 +13,21 @@ import (
 )
 
 var (
-	globalNetworkOnce     sync.Once
-	globalNetworkInit     bool
-	globalNetworkErr      error
-	globalTxFlow          *flow.Flow
-	globalSendCh          chan *packet.Packet
-	globalBytesCh         chan []byte                                       // 高性能字节发送通道
-	icmpHandlers          map[string]func([]byte, int, int, net.IP, net.IP) // ICMP处理器
-	localMAC              [6]uint8                                          // 本地网卡 MAC 地址
-	globalVXLANConfig     *VXLANConfig                                      // 全局 VXLAN 配置
-	globalVXLANHandler    *VXLANHandler                                     // 全局 VXLAN 处理器
-	globalPacketForwarder *PacketForwarder                                  // 全局数据包转发器
+	globalNetworkOnce sync.Once
+	globalNetworkInit bool
+	globalNetworkErr  error
+	globalTxFlow      *flow.Flow
+	globalSendCh      chan *packet.Packet
+	globalBytesCh     chan []byte                                       // 高性能字节发送通道
+	icmpHandlers      map[string]func([]byte, int, int, net.IP, net.IP) // ICMP处理器
+	localMAC          [6]uint8
+	// DPDK网卡的IP和网关MAC（初始化时获取并存储）
+	dpdkLocalIP           net.IP           // DPDK网卡的本地IP
+	dpdkGatewayMAC        net.HardwareAddr // DPDK网卡的网关MAC
+	globalVXLANConfig     *VXLANConfig     // 全局 VXLAN 配置
+	globalVXLANHandler    *VXLANHandler    // 全局 VXLAN 处理器
+	globalPacketForwarder *PacketForwarder // 全局数据包转发器
+	globalARPHandler      *ARPHandler      // 全局 ARP 处理器
 )
 
 func init() {
@@ -36,15 +38,32 @@ func init() {
 	localMAC = [6]uint8{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}
 }
 
-// getLocalIPFromEnv 从环境变量获取本地IP地址，如果没有设置则使用默认值
-func getLocalIPFromEnv() net.IP {
+// getLocalIP 获取DPDK网卡本地IP地址
+func getLocalIP() net.IP {
+	if dpdkLocalIP != nil {
+		return dpdkLocalIP
+	}
+
+	// 如果全局变量未设置，尝试从环境变量获取
 	if ipStr := os.Getenv("DPDKNET_LOCAL_IP"); ipStr != "" {
 		if ip := net.ParseIP(ipStr); ip != nil {
-			return ip.To4()
+			dpdkLocalIP = ip.To4()
+			return dpdkLocalIP
 		}
 	}
-	// 默认IP地址
+
 	return net.IPv4(192, 168, 66, 57)
+}
+
+// getGatewayMAC 获取DPDK网卡网关MAC地址
+func getGatewayMAC() net.HardwareAddr {
+	if dpdkGatewayMAC != nil {
+		return dpdkGatewayMAC
+	}
+
+	// 如果全局变量未设置，返回默认值
+	log.Printf("[Network] 网关MAC未初始化，使用默认值")
+	return net.HardwareAddr{0xfe, 0xee, 0x89, 0x96, 0xac, 0xa3}
 }
 
 // getRemoteVTEPFromEnv 从环境变量获取远程 VTEP IP地址
@@ -61,19 +80,22 @@ func getRemoteVTEPFromEnv() net.IP {
 // EnsureGlobalNetworkInit 确保全局网络系统只初始化一次
 func EnsureGlobalNetworkInit() error {
 	globalNetworkOnce.Do(func() {
-		globalNetworkErr = initializeGlobalNetwork()
-		if globalNetworkErr == nil {
-			globalNetworkInit = true
-		}
+		initializeGlobalNetwork()
+		globalNetworkInit = true
 	})
 	return globalNetworkErr
 }
 
 // initializeGlobalNetwork 初始化全局网络系统
-func initializeGlobalNetwork() error {
+func initializeGlobalNetwork() {
 	// 初始化DPDK
 	if err := Init(); err != nil {
-		return err
+		panic(err)
+	}
+
+	// 初始化pcap抓包功能
+	if err := InitPcapCapture(); err != nil {
+		log.Printf("[WARN] Failed to initialize pcap capture: %v", err)
 	}
 
 	// DPDK使用物理端口ID，通常从0开始
@@ -83,7 +105,7 @@ func initializeGlobalNetwork() error {
 	rxFlow, err := flow.SetReceiver(dpdkPort)
 	if err != nil {
 		log.Printf("[ERROR] Failed to set receiver on DPDK port %d: %v", dpdkPort, err)
-		return err
+		panic(err)
 	}
 
 	// 设置接收处理器
@@ -93,46 +115,95 @@ func initializeGlobalNetwork() error {
 	// 关闭接收流
 	if err := flow.SetSender(rxFlow, dpdkPort); err != nil {
 		log.Printf("[ERROR] Failed to set RX sender: %v", err)
-		return err
+		panic(err)
 	}
 
 	// 流2：发送流 - SetGenerator -> SetSender
 	globalTxFlow = flow.SetGenerator(globalSendGenerator, nil)
 	if err := flow.SetSender(globalTxFlow, dpdkPort); err != nil {
 		log.Printf("[ERROR] Failed to set TX sender: %v", err)
-		return err
+		panic(err)
 	}
 
 	// 启动DPDK数据包处理系统
 	if !IsStarted() {
 		if err := SystemStart(); err != nil {
 			log.Printf("[ERROR] Failed to start DPDK system: %v", err)
-			return err
+			panic(err)
 		}
 	}
 
-	// 初始化和启动 gVisor netstack
+	// DPDK已完成初始化，立即获取网络配置
+	log.Printf("[Network] DPDK初始化完成，开始获取网络配置...")
 
-	// 尝试从环境变量获取IP地址，如果没有设置则使用默认值
-	localIP := getLocalIPFromEnv()
-	if err := IntegrateGVisorWithDPDK(localIP, localMAC); err != nil {
-		log.Printf("[ERROR] Failed to integrate gVisor with DPDK: %v", err)
-		return err
+	// 确保本地IP已设置
+	if dpdkLocalIP == nil {
+		dpdkLocalIP = getLocalIP()
+		if dpdkLocalIP == nil {
+			panic("[Network] 本地IP未设置，请通过环境变量DPDKNET_LOCAL_IP设置或实现DHCP获取")
+		}
+	}
+	// 确保本地IP是IPv4格式
+	dpdkLocalIP = dpdkLocalIP.To4()
+	if dpdkLocalIP == nil {
+		panic("[Network] 本地IP不是有效的IPv4地址")
+	}
+	log.Printf("[Network] 使用本地IP: %s", dpdkLocalIP.String())
+
+	// 获取网关IP，通过环境变量或计算默认网关
+	var gatewayIP net.IP
+	if gatewayIPStr := os.Getenv("DPDKNET_GATEWAY_IP"); gatewayIPStr != "" {
+		gatewayIP = net.ParseIP(gatewayIPStr)
+		if gatewayIP == nil {
+			panic(fmt.Sprintf("[Network] 无效的网关IP环境变量: %s", gatewayIPStr))
+		}
+		gatewayIP = gatewayIP.To4() // 确保是IPv4
+		log.Printf("[Network] 使用环境变量设置的网关IP: %s", gatewayIP.String())
+	} else {
+		// 计算默认网关（假设是同网段的.1地址）
+		localIPv4 := dpdkLocalIP.To4()
+		if localIPv4 == nil {
+			panic(fmt.Sprintf("[Network] 本地IP不是有效的IPv4地址: %s", dpdkLocalIP.String()))
+		}
+		gatewayIP = net.IPv4(localIPv4[0], localIPv4[1], localIPv4[2], 1)
+		log.Printf("[Network] 计算默认网关IP: %s", gatewayIP.String())
 	}
 
+	// 通过ARP获取网关MAC
+	log.Printf("[Network] 通过ARP获取网关MAC: %s", gatewayIP.String())
+	globalARPHandler = NewARPHandler(dpdkLocalIP, net.HardwareAddr(localMAC[:]))
+
+	gatewayMAC, err := globalARPHandler.RequestMAC(gatewayIP)
+	if err != nil {
+		ClosePcapCapture()
+		panic(fmt.Sprintf("[Network] ARP获取网关MAC失败: %v", err))
+	}
+
+	// 保存网关MAC
+	dpdkGatewayMAC = gatewayMAC
+	log.Printf("[Network] 成功获取网关MAC: %s", gatewayMAC.String())
+
+	log.Printf("[Network] 网络配置获取完成 - 本地IP: %s, 网关IP: %s, 网关MAC: %s",
+		dpdkLocalIP.String(), gatewayIP.String(), dpdkGatewayMAC.String())
+
+	// 使用获取到的真实IP初始化gVisor
+	if err := IntegrateGVisorWithDPDK(dpdkLocalIP, localMAC); err != nil {
+		log.Printf("[ERROR] Failed to integrate gVisor with DPDK: %v", err)
+		panic(err)
+	}
+	
 	// 执行 VXLAN 网络协议栈初始化流程
 	if err := initializeVXLANNetworkStack(); err != nil {
 		log.Printf("[ERROR] Failed to initialize VXLAN network stack: %v", err)
-		return err
+		panic(err)
 	}
 
 	// 检查环境变量是否需要启动数据包转发器
 	if err := initializePacketForwarder(); err != nil {
 		log.Printf("[ERROR] Failed to initialize packet forwarder: %v", err)
-		return err
+		panic(err)
 	}
 
-	return nil
 }
 
 // initializeVXLANNetworkStack 初始化 VXLAN 网络协议栈
@@ -141,19 +212,17 @@ func initializeVXLANNetworkStack() error {
 	// 步骤1: 建立 VXLAN 隧道
 	vxlanConfig := &VXLANConfig{
 		VNI:       66,
-		LocalIP:   getLocalIPFromEnv(),                                  // 外层本地VTEP IP
+		LocalIP:   getLocalIP(),                                         // 外层本地VTEP IP
 		RemoteIP:  getRemoteVTEPFromEnv(),                               // 外层远程VTEP IP
 		UDPPort:   4789,                                                 // VXLAN 端口
 		LocalMAC:  net.HardwareAddr(localMAC[:]),                        // 内层本地MAC
 		RemoteMAC: net.HardwareAddr{0xd8, 0x85, 0xc0, 0xa8, 0x42, 0x1d}, // 内层远程MAC (示例)
 	}
 
-	var dhcpOffer *DHCPOfferInfo
-
 	dhcpClient := NewDHCPClient(vxlanConfig.LocalMAC, vxlanConfig, "vxlan-host")
 
 	var err error
-	dhcpOffer, err = dhcpClient.SendDHCPDiscover(5 * time.Second) // 5秒超时
+	dhcpOffer, err := dhcpClient.SendDHCPDiscover(5 * time.Second) // 5秒超时
 	if err != nil {
 		panic(fmt.Sprintf("DHCP Discover failed: %v", err))
 	}
@@ -162,6 +231,12 @@ func initializeVXLANNetworkStack() error {
 	vxlanIP := dhcpOffer.YourIP        // DHCP 分配的内层 IP
 	gatewayIP := dhcpOffer.Gateway     // DHCP 提供的网关 IP
 	gatewayMAC := dhcpOffer.GatewayMAC // DHCP 提供的网关 MAC
+
+	// 创建 ARP 处理器
+	arpHandler := NewARPHandler(vxlanIP, vxlanConfig.LocalMAC)
+	arpHandler.arpTable.AddEntry(gatewayIP, gatewayMAC)
+
+	SetGlobalVXLANARPHandler(arpHandler)
 
 	// 设置网关信息到VXLAN配置中
 	vxlanConfig.SetGateway(gatewayIP, gatewayMAC)
@@ -177,11 +252,7 @@ func initializeVXLANNetworkStack() error {
 			vxlanConfig.UDPPort, // 4789端口
 		)
 	}
-	// 创建 ARP 处理器
-	arpHandler := NewARPHandler(vxlanIP, vxlanConfig.LocalMAC)
-	arpHandler.arpTable.AddEntry(gatewayIP, gatewayMAC)
 
-	SetGlobalVXLANARPHandler(arpHandler)
 	return nil
 }
 
@@ -225,61 +296,11 @@ func setupDefaultFilters(forwarder *PacketForwarder) error {
 	vxlanFilter := NewVXLANFilter("VXLAN过滤器", 66)
 	forwarder.AddFilter(vxlanFilter)
 
-	// 2. 从环境变量获取目标IP和网络
-	targetIPsEnv := os.Getenv("FORWARDER_TARGET_IPS")
-	targetNetworksEnv := os.Getenv("FORWARDER_TARGET_NETWORKS")
-
-	var targetIPs []string
-	var targetNetworks []string
-
-	if targetIPsEnv != "" {
-		targetIPs = strings.Split(targetIPsEnv, ",")
-		for i := range targetIPs {
-			targetIPs[i] = strings.TrimSpace(targetIPs[i])
-		}
-	}
-
-	if targetNetworksEnv != "" {
-		targetNetworks = strings.Split(targetNetworksEnv, ",")
-		for i := range targetNetworks {
-			targetNetworks[i] = strings.TrimSpace(targetNetworks[i])
-		}
-	}
-
-	// 如果有IP过滤配置，添加IP过滤器
-	if len(targetIPs) > 0 || len(targetNetworks) > 0 {
-		ipFilter := NewIPFilter("IP过滤器", targetIPs, targetNetworks)
-		forwarder.AddFilter(ipFilter)
-		log.Printf("[INFO] Added IP filter - IPs: %v, Networks: %v", targetIPs, targetNetworks)
-	}
-
-	// 3. 从环境变量获取目标端口
-	targetPortsEnv := os.Getenv("FORWARDER_TARGET_PORTS")
-	if targetPortsEnv != "" {
-		var targetPorts []uint16
-		portStrs := strings.Split(targetPortsEnv, ",")
-
-		for _, portStr := range portStrs {
-			portStr = strings.TrimSpace(portStr)
-			if port, err := strconv.ParseUint(portStr, 10, 16); err == nil {
-				targetPorts = append(targetPorts, uint16(port))
-			} else {
-				log.Printf("[WARN] Invalid port number: %s", portStr)
-			}
-		}
-
-		if len(targetPorts) > 0 {
-			portFilter := NewPortFilter("端口过滤器", targetPorts)
-			forwarder.AddFilter(portFilter)
-			log.Printf("[INFO] Added port filter - Ports: %v", targetPorts)
-		}
-	} else {
-		// 默认端口过滤器
-		defaultPorts := []uint16{4789, 22, 80, 443, 32333, 9999} // VXLAN, SSH, HTTP, HTTPS
-		portFilter := NewPortFilter("端口过滤器", defaultPorts)
-		forwarder.AddFilter(portFilter)
-		log.Printf("[INFO] Added default port filter - Ports: %v", defaultPorts)
-	}
+	// 默认端口过滤器
+	defaultPorts := []uint16{4789, 22, 80, 443, 32333, 9999} // VXLAN, SSH, HTTP, HTTPS
+	portFilter := NewPortFilter("端口过滤器", defaultPorts)
+	forwarder.AddFilter(portFilter)
+	log.Printf("[INFO] Added default port filter - Ports: %v", defaultPorts)
 
 	return nil
 }
@@ -313,13 +334,33 @@ func IsVXLANEnabled() bool {
 func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 	data := pkt.GetRawPacketBytes()
 
+	// 将所有收到的数据包写入pcap文件
+	if err := WritePacketToPcap(data); err != nil {
+		// 不影响正常处理流程，只记录错误
+		log.Printf("[PCAP] Failed to write packet to pcap: %v", err)
+	}
+
 	// 快速检查以太网帧长度
 	if len(data) < 14 {
 		return
 	}
 
-	// 快速检查是否为IP协议 (EtherType = 0x0800)
-	if data[12] != 0x08 || data[13] != 0x00 {
+	// 检查EtherType
+	etherType := uint16(data[12])<<8 | uint16(data[13])
+
+	// 优先处理ARP包 (EtherType = 0x0806)
+	if etherType == 0x0806 {
+		// 使用全局ARP处理器处理ARP包
+		if globalARPHandler != nil {
+			if err := globalARPHandler.HandleARPPacket(data); err != nil {
+				log.Printf("[ARP] Failed to handle ARP packet: %v", err)
+			}
+		}
+		return
+	}
+
+	// 检查是否为IP协议 (EtherType = 0x0800)
+	if etherType != 0x0800 {
 		return
 	}
 
@@ -380,9 +421,17 @@ func globalPacketHandler(pkt *packet.Packet, ctx flow.UserContext) {
 func globalSendGenerator(pkt *packet.Packet, ctx flow.UserContext) {
 	select {
 	case sendPkt := <-globalSendCh:
+		if err := WritePacketToPcap(sendPkt.GetRawPacketBytes()); err != nil {
+			// 不影响正常处理流程，只记录错误
+			log.Printf("[PCAP] Failed to write packet to pcap: %v", err)
+		}
 		packet.GeneratePacketFromByte(pkt, sendPkt.GetRawPacketBytes())
 		// DPDK 包通过引用计数自动管理，不需要手动释放
 	case sendBytes := <-globalBytesCh:
+		if err := WritePacketToPcap(sendBytes); err != nil {
+			// 不影响正常处理流程，只记录错误
+			log.Printf("[PCAP] Failed to write packet to pcap: %v", err)
+		}
 		packet.GeneratePacketFromByte(pkt, sendBytes)
 	default:
 		packet.InitEmptyPacket(pkt, 0)
@@ -482,9 +531,63 @@ func extractVXLANPayload(data []byte) []byte {
 	return data[innerFrameStart:]
 }
 
+// buildARPReply 构造ARP回复包
+func buildARPReply(requestData []byte, localIP net.IP, localMAC []byte) []byte {
+	if len(requestData) < 42 || len(localMAC) < 6 {
+		return nil
+	}
+
+	// 创建回复包（长度与请求包相同）
+	reply := make([]byte, 42)
+
+	arpOffset := 14
+
+	// 构造以太网头部
+	// 目标MAC = 请求包的源MAC
+	copy(reply[0:6], requestData[6:12])
+	// 源MAC = 我们的MAC
+	copy(reply[6:12], localMAC)
+	// EtherType = ARP (0x0806)
+	reply[12] = 0x08
+	reply[13] = 0x06
+
+	// 构造ARP头部
+	// Hardware Type = 1 (以太网)
+	reply[arpOffset] = 0x00
+	reply[arpOffset+1] = 0x01
+	// Protocol Type = 0x0800 (IPv4)
+	reply[arpOffset+2] = 0x08
+	reply[arpOffset+3] = 0x00
+	// Hardware Address Length = 6
+	reply[arpOffset+4] = 0x06
+	// Protocol Address Length = 4
+	reply[arpOffset+5] = 0x04
+	// Operation = 2 (ARP回复)
+	reply[arpOffset+6] = 0x00
+	reply[arpOffset+7] = 0x02
+
+	// Sender Hardware Address = 我们的MAC
+	copy(reply[arpOffset+8:arpOffset+14], localMAC)
+	// Sender Protocol Address = 我们的IP
+	localIPv4 := localIP.To4()
+	copy(reply[arpOffset+14:arpOffset+18], localIPv4)
+
+	// Target Hardware Address = 请求方的MAC (从请求包的源MAC获取)
+	copy(reply[arpOffset+18:arpOffset+24], requestData[6:12])
+	// Target Protocol Address = 请求方的IP (从请求包的源IP获取)
+	copy(reply[arpOffset+24:arpOffset+28], requestData[arpOffset+14:arpOffset+18])
+
+	return reply
+}
+
 // GetGlobalPacketForwarder 获取全局数据包转发器
 func GetGlobalPacketForwarder() *PacketForwarder {
 	return globalPacketForwarder
+}
+
+// GetGlobalARPHandler 获取全局ARP处理器
+func GetGlobalARPHandler() *ARPHandler {
+	return globalARPHandler
 }
 
 // CleanupGlobalNetwork 清理全局网络资源
@@ -495,4 +598,7 @@ func CleanupGlobalNetwork() {
 		globalPacketForwarder.Close()
 		globalPacketForwarder = nil
 	}
+
+	// 关闭pcap抓包并打印文件信息
+	ClosePcapCapture()
 }

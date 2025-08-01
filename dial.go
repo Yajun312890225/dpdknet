@@ -180,6 +180,6 @@ func DialUDP(network string, laddr, raddr *UDPAddr) (*UDPConn, error) {
 // DialICMPWithVXLAN creates an ICMP connection with optional VXLAN encapsulation.
 func DialICMPWithVXLAN(raddr *net.IPAddr) (*ICMPConn, error) {
 	var localIP net.IP
-	localIP = getLocalIPFromEnv()
+	localIP = getLocalIP()
 	return NewICMPConnWithVXLAN(localIP, GetGlobalVXLANConfig())
 }
