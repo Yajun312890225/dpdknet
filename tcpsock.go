@@ -11,7 +11,7 @@ import (
 type TCPConn struct {
 	localAddr  *TCPAddr
 	remoteAddr *TCPAddr
-	mu         sync.Mutex
+	mu         sync.RWMutex // 使用读写锁
 	closed     bool
 
 	// gVisor 集成
@@ -287,8 +287,8 @@ func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 }
 
 func (c *TCPConn) Read(buf []byte) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
 	if c.closed {
 		return 0, errors.New("connection closed")
@@ -303,8 +303,10 @@ func (c *TCPConn) Read(buf []byte) (int, error) {
 }
 
 func (c *TCPConn) Write(data []byte) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer func() {
+		c.mu.RUnlock()
+	}()
 
 	if c.closed {
 		return 0, errors.New("connection closed")
