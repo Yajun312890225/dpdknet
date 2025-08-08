@@ -4,15 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"sync"
 	"time"
 )
 
 type TCPConn struct {
 	localAddr  *TCPAddr
 	remoteAddr *TCPAddr
-	mu         sync.RWMutex // 使用读写锁
-	closed     bool
+	// mu         sync.RWMutex // 使用读写锁
+	closed bool
 
 	// gVisor 集成
 	gvisorConn net.Conn // gVisor TCP 连接
@@ -24,8 +23,8 @@ type TCPConn struct {
 
 type TCPListener struct {
 	localAddr *TCPAddr
-	mu        sync.Mutex
-	closed    bool
+	// mu        sync.Mutex
+	closed bool
 
 	// gVisor 集成
 	gvisorListener net.Listener // gVisor TCP 监听器
@@ -77,12 +76,12 @@ func ListenTCPWithVXLAN(network string, laddr *TCPAddr) (*TCPListener, error) {
 }
 
 func (l *TCPListener) Accept() (net.Conn, error) {
-	l.mu.Lock()
-	if l.closed {
-		l.mu.Unlock()
-		return nil, errors.New("listener closed")
-	}
-	l.mu.Unlock()
+	// l.mu.Lock()
+	// if l.closed {
+	// 	l.mu.Unlock()
+	// 	return nil, errors.New("listener closed")
+	// }
+	// l.mu.Unlock()
 
 	if l.gvisorListener == nil {
 		return nil, errors.New("gVisor listener not available")
@@ -126,8 +125,8 @@ func (l *TCPListener) AcceptTCP() (*TCPConn, error) {
 }
 
 func (l *TCPListener) Close() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	// l.mu.Lock()
+	// defer l.mu.Unlock()
 	if l.closed {
 		return nil
 	}
@@ -287,8 +286,8 @@ func DialTCPWithVXLAN(network string, laddr, raddr *TCPAddr) (*TCPConn, error) {
 }
 
 func (c *TCPConn) Read(buf []byte) (int, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	// c.mu.RLock()
+	// defer c.mu.RUnlock()
 
 	if c.closed {
 		return 0, errors.New("connection closed")
@@ -303,10 +302,10 @@ func (c *TCPConn) Read(buf []byte) (int, error) {
 }
 
 func (c *TCPConn) Write(data []byte) (int, error) {
-	c.mu.RLock()
-	defer func() {
-		c.mu.RUnlock()
-	}()
+	// c.mu.RLock()
+	// defer func() {
+	// 	c.mu.RUnlock()
+	// }()
 
 	if c.closed {
 		return 0, errors.New("connection closed")
@@ -321,8 +320,8 @@ func (c *TCPConn) Write(data []byte) (int, error) {
 }
 
 func (c *TCPConn) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// c.mu.Lock()
+	// defer c.mu.Unlock()
 
 	if c.closed {
 		return nil

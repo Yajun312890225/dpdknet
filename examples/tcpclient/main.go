@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bufio"
-	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/Yajun312890225/dpdknet"
@@ -18,7 +15,8 @@ func main() {
 	log.Printf("[INFO] Starting TCP Client example...")
 
 	// 检查参数
-	serverAddr := "127.0.0.1:8080"
+	serverAddr := "101.35.244.39:6888"
+	// serverAddr := "43.136.168.109:8000"
 	if len(os.Args) > 1 {
 		serverAddr = os.Args[1]
 	}
@@ -37,54 +35,50 @@ func main() {
 	}
 	defer conn.Close()
 
-	log.Printf("[INFO] Connected to server %s from local %s", 
+	log.Printf("[INFO] Connected to server %s from local %s",
 		conn.RemoteAddr().String(), conn.LocalAddr().String())
 
 	// 启动接收消息的goroutine
 	go receiveMessages(conn)
+	message := "Hello, TCP Server!"
+	for i := 0; i < 10; i++ { // 限制循环次数，便于调试
+		log.Printf("[DEBUG] Loop iteration: %d", i+1)
 
-	// 主循环 - 发送用户输入
-	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Println("Connected! Type messages to send (type 'quit' to exit):")
+		// 检查连接状态
+		log.Printf("[DEBUG] Connection local addr: %v, remote addr: %v", conn.LocalAddr(), conn.RemoteAddr())
 
-	for {
-		fmt.Print("> ")
-		if !scanner.Scan() {
+		err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) // 设置写入超时
+		if err != nil {
+			log.Printf("[ERROR] Failed to set write deadline: %v", err)
 			break
 		}
-
-		message := scanner.Text()
-		if message == "" {
-			continue
-		}
+		log.Printf("[DEBUG] Write deadline set successfully")
 
 		// 发送消息
-		_, err := conn.Write([]byte(message + "\n"))
+		log.Printf("[DEBUG] Attempting to write message...")
+		start := time.Now()
+		n, err := conn.Write([]byte(message + "\n"))
+		elapsed := time.Since(start)
+
 		if err != nil {
-			log.Printf("[ERROR] Failed to send message: %v", err)
+			log.Printf("[ERROR] Failed to send message after %v: %v", elapsed, err)
 			break
 		}
 
-		log.Printf("[INFO] Sent message: %s", message)
+		log.Printf("[INFO] Sent message: %s (wrote %d bytes in %v)", message, n, elapsed)
 
-		// 检查是否退出
-		if strings.ToLower(strings.TrimSpace(message)) == "quit" {
-			log.Printf("[INFO] Quit command sent, closing connection...")
-			time.Sleep(100 * time.Millisecond) // 等待服务器响应
-			break
-		}
+		log.Printf("[DEBUG] Sleeping for 1 second...")
+		time.Sleep(1 * time.Second) // 每秒发送一次消息
+		log.Printf("[DEBUG] Sleep completed")
 	}
 
-	if err := scanner.Err(); err != nil {
-		log.Printf("[ERROR] Error reading input: %v", err)
-	}
+	log.Printf("[INFO] Finished sending messages")
 
-	log.Printf("[INFO] Client shutting down...")
 }
 
 func receiveMessages(conn net.Conn) {
 	buffer := make([]byte, 4096)
-	
+
 	for {
 		// 设置读取超时
 		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -100,16 +94,10 @@ func receiveMessages(conn net.Conn) {
 			} else {
 				log.Printf("[ERROR] Failed to read from server: %v", err)
 			}
+			log.Printf("[ERROR] Exiting receiveMessages goroutine")
 			return
 		}
+		log.Printf("[INFO] Received %d bytes from server: %s", n, string(buffer[:n]))
 
-		if n > 0 {
-			message := string(buffer[:n])
-			// 移除换行符显示
-			message = strings.TrimRight(message, "\n\r")
-			fmt.Printf("\nServer: %s\n> ", message)
-			
-			log.Printf("[INFO] Received %d bytes from server: %s", n, message)
-		}
 	}
 }

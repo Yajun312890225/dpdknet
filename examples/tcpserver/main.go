@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Yajun312890225/dpdknet"
+	"github.com/Yajun312890225/nff-go/flow"
 )
 
 func main() {
@@ -67,6 +68,7 @@ func main() {
 
 	// 清理网络资源（包括pcap抓包）
 	dpdknet.CleanupGlobalNetwork()
+	flow.SystemStop()
 }
 
 func handleTCPConnection(conn net.Conn) {
